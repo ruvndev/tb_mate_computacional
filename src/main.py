@@ -1,18 +1,69 @@
+import itertools
+import math
 import random
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 from typing import Dict, List, Optional, Tuple, Any, cast
 
 import networkx as nx
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backends.backend_tkagg import (
+    FigureCanvasTkAgg,
+    NavigationToolbar2Tk
+)
 from matplotlib.figure import Figure
 
+class BarraHerramientasEspanol(NavigationToolbar2Tk):
+    toolitems = (
+        ("Inicio", "Restablecer la vista inicial", "home", "home"),
+        ("Anterior", "Volver a la vista anterior", "back", "back"),
+        ("Siguiente", "Recuperar la vista siguiente", "forward", "forward"),
+        (None, None, None, None),
+        ("Mover", "Desplazar el gráfico con el ratón", "move", "pan"),
+        ("Zoom", "Ampliar una región del gráfico", "zoom_to_rect", "zoom"),
+        (None, None, None, None),
+        ("Guardar", "Guardar el gráfico como imagen", "filesave", "save_figure"),
+    )
+
+    def save_figure(self):
+        filename = filedialog.asksaveasfilename(
+            parent=self.winfo_toplevel(),
+            title="Guardar gráfico",
+            initialfile="grafo_camino_minimo.png",
+            defaultextension=".png",
+            filetypes=(
+                ("Imagen PNG", "*.png"),
+                ("Documento PDF", "*.pdf"),
+                ("Imagen SVG", "*.svg"),
+            ),
+        )
+
+        if not filename:
+            return
+
+        try:
+            self.canvas.figure.savefig(
+                filename,
+                bbox_inches="tight"
+            )
+        except (OSError, ValueError) as error:
+            messagebox.showerror(
+                "Error al guardar",
+                f"No se pudo guardar el gráfico.\n{error}",
+                parent=self.winfo_toplevel()
+            )
+            return
+
+        messagebox.showinfo(
+            "Gráfico guardado",
+            f"El gráfico se guardó correctamente en:\n{filename}",
+            parent=self.winfo_toplevel()
+        )
 
 class ProjectInfo:
     def __init__(self) -> None:
         self.course = "Matemática Computacional (1AMA0726)"
         self.theme = "Algoritmos de caminos mínimos"
-        self.delivery = "Avance de la Semana 6 (TB1)"
+        self.delivery = "Entrega final de la semana 11 (TB)"
         self.group = "3"
 
         self.integrants = [
@@ -22,7 +73,6 @@ class ProjectInfo:
             "Ruben Alvaro Palpa Guimaray",
             "Tayra Valentina Espinoza Ramírez",
         ]
-
 
 class GraphModel:
     def __init__(self) -> None:
@@ -36,6 +86,10 @@ class GraphModel:
             str, List[Tuple[float, Optional[str], int, bool]]
         ] = {}
 
+        self.optimal_predecessors: Dict[str, List[str]] = {}
+
+        self.decision_history: List[str] = []
+
         self.processed_nodes: List[str] = []
 
         self.iteration = 0
@@ -47,9 +101,180 @@ class GraphModel:
 
         self.algorithm_finished = False
 
+        self.layout_seed = 101
+
+    @staticmethod
+    def build_base_2d_slots(
+        node_count: int,
+        rng: random.Random
+    ) -> List[List[Tuple[float, float]]]:
+        width = 16.0
+        height = 10.0
+        x_margin = 1.3
+        y_margin = 1.1
+        usable_w = width - 2 * x_margin
+        usable_h = height - 2 * y_margin
+
+        preset_zones: Dict[int, List[int]] = {
+            7: [1, 2, 2, 2],
+            8: [1, 2, 3, 2],
+            9: [1, 3, 3, 2],
+            10: [1, 3, 3, 2, 1],
+            11: [1, 3, 3, 3, 1],
+            12: [1, 3, 3, 3, 2],
+            13: [2, 3, 3, 3, 2],
+            14: [1, 3, 3, 3, 3, 1],
+            15: [2, 3, 3, 3, 3, 1],
+            16: [2, 3, 3, 3, 3, 2],
+        }
+
+        if node_count in preset_zones:
+            zone_sizes = list(preset_zones[node_count])
+        else:
+            zone_sizes = []
+            rem = node_count
+            while rem > 0:
+                take = min(3, rem)
+                zone_sizes.append(take)
+                rem -= take
+
+        num_zones = len(zone_sizes)
+        zones_coords: List[List[Tuple[float, float]]] = []
+
+        for z_idx, k in enumerate(zone_sizes):
+            base_x = (
+                x_margin
+                + (z_idx / max(1, num_zones - 1)) * usable_w
+            )
+            zone_pts: List[Tuple[float, float]] = []
+
+            if k == 1:
+                y_frac = (
+                    0.48
+                    + (0.08 if z_idx % 2 == 0 else -0.08)
+                    + rng.uniform(-0.08, 0.08)
+                )
+                x_jit = (
+                    0.0
+                    if z_idx in (0, num_zones - 1)
+                    else rng.uniform(-0.22, 0.22)
+                )
+                zone_pts.append(
+                    (
+                        base_x + x_jit,
+                        y_margin + y_frac * usable_h
+                    )
+                )
+            else:
+                band_shift = (
+                    0.065 if (z_idx % 2 == 1) else -0.065
+                )
+                stagger_dir = (
+                    1.0 if (z_idx % 2 == 0) else -1.0
+                )
+                raw_pts: List[Tuple[float, float]] = []
+
+                for slot_i in range(k):
+                    frac = (slot_i + 0.5) / k + band_shift
+                    frac = max(0.06, min(0.94, frac))
+                    y_val = (
+                        y_margin
+                        + frac * usable_h
+                        + rng.uniform(-0.14, 0.14)
+                    )
+                    x_off = (
+                        (slot_i - (k - 1) / 2.0)
+                        * 0.52
+                        * stagger_dir
+                        + rng.uniform(-0.12, 0.12)
+                    )
+                    if z_idx == 0:
+                        x_off = max(-0.15, x_off * 0.35)
+                    elif z_idx == num_zones - 1:
+                        x_off = min(0.15, x_off * 0.35)
+
+                    raw_pts.append(
+                        (
+                            base_x + x_off,
+                            max(
+                                y_margin,
+                                min(height - y_margin, y_val)
+                            ),
+                        )
+                    )
+
+                if k == 3:
+                    order = (
+                        [0, 2, 1]
+                        if (z_idx % 2 == 1)
+                        else [2, 0, 1]
+                    )
+                elif k == 2:
+                    order = (
+                        [1, 0]
+                        if (z_idx % 2 == 1)
+                        else [0, 1]
+                    )
+                else:
+                    order = list(range(k))
+
+                for idx_o in order:
+                    zone_pts.append(raw_pts[idx_o])
+
+            zones_coords.append(zone_pts)
+
+        return zones_coords
+
+    @staticmethod
+    def segments_intersect(
+        p1: Tuple[float, float],
+        p2: Tuple[float, float],
+        p3: Tuple[float, float],
+        p4: Tuple[float, float],
+    ) -> bool:
+        def ccw(
+            a: Tuple[float, float],
+            b: Tuple[float, float],
+            c: Tuple[float, float],
+        ) -> float:
+            return (
+                (b[0] - a[0]) * (c[1] - a[1])
+                - (b[1] - a[1]) * (c[0] - a[0])
+            )
+
+        d1 = ccw(p1, p2, p3)
+        d2 = ccw(p1, p2, p4)
+        d3 = ccw(p3, p4, p1)
+        d4 = ccw(p3, p4, p2)
+
+        return (
+            ((d1 > 0 and d2 < 0) or (d1 < 0 and d2 > 0))
+            and ((d3 > 0 and d4 < 0) or (d3 < 0 and d4 > 0))
+        )
+
+    @staticmethod
+    def point_to_segment_dist(
+        p: Tuple[float, float],
+        a: Tuple[float, float],
+        b: Tuple[float, float],
+    ) -> float:
+        dx = b[0] - a[0]
+        dy = b[1] - a[1]
+        l2 = dx * dx + dy * dy
+        if l2 < 1e-6:
+            return math.hypot(p[0] - a[0], p[1] - a[1])
+        t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2
+        if t <= 0.05 or t >= 0.95:
+            return float("inf")
+        proj_x = a[0] + t * dx
+        proj_y = a[1] + t * dy
+        return math.hypot(p[0] - proj_x, p[1] - proj_y)
+
     def reset_algorithm_data(self) -> None:
         self.labels.clear()
         self.label_history.clear()
+        self.optimal_predecessors.clear()
+        self.decision_history.clear()
         self.processed_nodes.clear()
 
         self.iteration = 0
@@ -63,56 +288,274 @@ class GraphModel:
         self.graph.clear()
         self.reset_algorithm_data()
 
+        self.layout_seed = random.randint(1, 1_000_000)
+
         nodes = [f"N{i}" for i in range(1, node_count + 1)]
 
         self.graph.add_nodes_from(nodes)
 
-        for index in range(node_count - 1):
-            source_node = nodes[index]
-            target_node = nodes[index + 1]
+        slot_rng = random.Random(self.layout_seed)
+        zones_coords = self.build_base_2d_slots(
+            node_count,
+            slot_rng
+        )
 
-            self.graph.add_edge(
-                source_node,
-                target_node,
-                weight=random.randint(1, 20),
-            )
+        pos: Dict[str, Tuple[float, float]] = {}
+        cursor = 0
+        node_zone: Dict[str, int] = {}
 
-        for source_index in range(node_count):
-            for target_index in range(source_index + 2, node_count):
+        for z_idx, zone_pts in enumerate(zones_coords):
+            for pt in zone_pts:
+                u = nodes[cursor]
+                pos[u] = pt
+                node_zone[u] = z_idx
+                cursor += 1
 
-                if random.random() < 0.25:
-                    source_node = nodes[source_index]
-                    target_node = nodes[target_index]
-
-                    if not self.graph.has_edge(
-                        source_node,
-                        target_node
+        def can_add_clean_edge(
+            u: str,
+            v: str,
+            allow_crossing: bool = False
+        ) -> bool:
+            if self.graph.has_edge(u, v):
+                return False
+            p1, p2 = pos[u], pos[v]
+            if p2[0] < p1[0] - 0.35:
+                return False
+            for w in nodes:
+                if w == u or w == v:
+                    continue
+                if self.point_to_segment_dist(pos[w], p1, p2) < 0.95:
+                    return False
+            if not allow_crossing:
+                for eu, ev in self.graph.edges:
+                    if eu in (u, v) or ev in (u, v):
+                        continue
+                    if self.segments_intersect(
+                        p1,
+                        p2,
+                        pos[eu],
+                        pos[ev]
                     ):
-                        self.graph.add_edge(
-                            source_node,
-                            target_node,
-                            weight=random.randint(1, 20),
+                        return False
+            return True
+
+        for j in range(1, node_count):
+            v = nodes[j]
+            zv = node_zone[v]
+            candidates = []
+            for i in range(j):
+                u = nodes[i]
+                zu = node_zone[u]
+                zone_diff = zv - zu
+                if 0 <= zone_diff <= 2:
+                    dist = math.hypot(
+                        pos[u][0] - pos[v][0],
+                        pos[u][1] - pos[v][1]
+                    )
+                    zone_penalty = (
+                        0.0
+                        if zone_diff == 1
+                        else (1.4 if zone_diff == 0 else 3.2)
+                    )
+                    candidates.append(
+                        (
+                            dist + zone_penalty + random.uniform(0, 0.45),
+                            u
                         )
+                    )
+            candidates.sort(key=lambda item: item[0])
+
+            added = False
+            for _, u in candidates:
+                if can_add_clean_edge(u, v, allow_crossing=False):
+                    self.graph.add_edge(
+                        u,
+                        v,
+                        weight=random.randint(1, 20)
+                    )
+                    added = True
+                    break
+            if not added and candidates:
+                self.graph.add_edge(
+                    candidates[0][1],
+                    v,
+                    weight=random.randint(1, 20)
+                )
+
+        for i in range(node_count - 1):
+            u = nodes[i]
+            if self.graph.out_degree(u) > 0:
+                continue
+            zu = node_zone[u]
+            candidates = []
+            for j in range(i + 1, node_count):
+                v = nodes[j]
+                zv = node_zone[v]
+                zone_diff = zv - zu
+                if 0 <= zone_diff <= 2:
+                    dist = math.hypot(
+                        pos[u][0] - pos[v][0],
+                        pos[u][1] - pos[v][1]
+                    )
+                    zone_penalty = (
+                        0.0
+                        if zone_diff == 1
+                        else (1.4 if zone_diff == 0 else 3.2)
+                    )
+                    candidates.append(
+                        (
+                            dist + zone_penalty + random.uniform(0, 0.45),
+                            v
+                        )
+                    )
+            candidates.sort(key=lambda item: item[0])
+
+            added = False
+            for _, v in candidates:
+                if can_add_clean_edge(u, v, allow_crossing=False):
+                    self.graph.add_edge(
+                        u,
+                        v,
+                        weight=random.randint(1, 20)
+                    )
+                    added = True
+                    break
+            if not added and candidates:
+                self.graph.add_edge(
+                    u,
+                    candidates[0][1],
+                    weight=random.randint(1, 20)
+                )
+
+        for i in range(node_count - 1):
+            u = nodes[i]
+            zu = node_zone[u]
+            target_out = (
+                2 if i > 0 else min(3, max(2, node_count // 5))
+            )
+            if random.random() < 0.35 and i < node_count - 3:
+                target_out = min(3, target_out + 1)
+
+            if self.graph.out_degree(u) >= target_out:
+                continue
+
+            candidates = []
+            for j in range(i + 1, node_count):
+                v = nodes[j]
+                zv = node_zone[v]
+                zone_diff = zv - zu
+                if (
+                    0 <= zone_diff <= 2
+                    and not self.graph.has_edge(u, v)
+                ):
+                    dist = math.hypot(
+                        pos[u][0] - pos[v][0],
+                        pos[u][1] - pos[v][1]
+                    )
+                    zone_penalty = (
+                        0.0
+                        if zone_diff == 1
+                        else (1.2 if zone_diff == 0 else 3.5)
+                    )
+                    candidates.append(
+                        (
+                            dist + zone_penalty + random.uniform(0, 0.6),
+                            v
+                        )
+                    )
+            candidates.sort(key=lambda item: item[0])
+
+            for _, v in candidates:
+                if self.graph.out_degree(u) >= target_out:
+                    break
+                if self.graph.in_degree(v) >= 3 and v != nodes[-1]:
+                    continue
+                if can_add_clean_edge(u, v, allow_crossing=False):
+                    self.graph.add_edge(
+                        u,
+                        v,
+                        weight=random.randint(1, 20)
+                    )
 
     def create_manual_graph(
-        self,
-        node_count: int,
-        edges: List[Tuple[str, str, int]]
+            self,
+            node_count: int,
+            edges: List[Tuple[str, str, int]]
     ) -> None:
 
-        self.graph.clear()
-        self.reset_algorithm_data()
+        if (
+                not isinstance(node_count, int)
+                or isinstance(node_count, bool)
+                or not 7 <= node_count <= 16
+        ):
+            raise ValueError(
+                "El número de nodos debe estar entre 7 y 16."
+            )
+
+        if not edges:
+            raise ValueError(
+                "El grafo debe tener al menos una arista."
+            )
 
         nodes = [f"N{i}" for i in range(1, node_count + 1)]
 
-        self.graph.add_nodes_from(nodes)
+        candidate_graph = nx.DiGraph()
+        candidate_graph.add_nodes_from(nodes)
+
+        seen_edges = set()
 
         for source, target, weight in edges:
-            self.graph.add_edge(
+
+            if source not in candidate_graph or target not in candidate_graph:
+                raise ValueError(
+                    f"La arista {source} -> {target} "
+                    "contiene un vértice inexistente."
+                )
+
+            if source == target:
+                raise ValueError(
+                    "No se permiten aristas de un vértice a sí mismo."
+                )
+
+            if (
+                    not isinstance(weight, int)
+                    or isinstance(weight, bool)
+                    or weight <= 0
+            ):
+                raise ValueError(
+                    "Todos los pesos deben ser enteros positivos."
+                )
+
+            edge = (source, target)
+
+            if edge in seen_edges:
+                raise ValueError(
+                    f"La conexión {source} -> {target} está repetida."
+                )
+
+            seen_edges.add(edge)
+
+            candidate_graph.add_edge(
                 source,
                 target,
-                weight=weight,
+                weight=weight
             )
+
+        if not nx.is_directed_acyclic_graph(candidate_graph):
+            raise ValueError(
+                "El grafo contiene un ciclo. Debe ser acíclico."
+            )
+
+        self.graph = candidate_graph
+        self.reset_algorithm_data()
+        self.layout_seed = (
+            sum(
+                (idx + 1) * ord(ch)
+                for idx, ch in enumerate(repr(edges))
+            )
+            % 1_000_000
+            + 1
+        )
 
     def get_nodes(self) -> List[str]:
         return list(self.graph.nodes)
@@ -133,9 +576,9 @@ class GraphModel:
         return int(weight)
 
     def initialize_dijkstra(
-        self,
-        source: str,
-        target: str
+            self,
+            source: str,
+            target: str
     ) -> Dict[str, Tuple[float, Optional[str], int]]:
 
         self.source = source
@@ -144,7 +587,6 @@ class GraphModel:
         self.iteration = 0
 
         self.processed_nodes.clear()
-
         self.current_node = None
 
         self.algorithm_finished = False
@@ -159,31 +601,33 @@ class GraphModel:
             for node in self.graph.nodes
         }
 
+        self.optimal_predecessors = {
+            node: []
+            for node in self.graph.nodes
+        }
+
         self.labels[source] = (0, None, 0)
 
         self.label_history[source].append(
             (0, None, 0, False)
         )
 
+        self.decision_history = [
+            f"Inicialización: el origen {source} recibe distancia 0.",
+            "Inicialización: los demás vértices reciben distancia ∞."
+        ]
+
         return self.labels.copy()
 
-    def get_unprocessed_reachable_nodes(self) -> List[str]:
-        available_nodes = []
-
-        for node in self.graph.nodes:
-
-            if node in self.processed_nodes:
-                continue
-
-            distance = self.labels[node][0]
-
-            if distance != float("inf"):
-                available_nodes.append(node)
-
-        return available_nodes
+    def get_unprocessed_nodes(self) -> List[str]:
+        return [
+            node
+            for node in self.graph.nodes
+            if node not in self.processed_nodes
+        ]
 
     def select_next_node(self) -> Optional[str]:
-        available_nodes = self.get_unprocessed_reachable_nodes()
+        available_nodes = self.get_unprocessed_nodes()
 
         if not available_nodes:
             return None
@@ -194,7 +638,7 @@ class GraphModel:
         )
 
     def execute_next_step(
-        self
+            self
     ) -> Dict[str, Tuple[float, Optional[str], int]]:
 
         if self.source is None:
@@ -209,19 +653,51 @@ class GraphModel:
 
         if next_node is None:
             self.algorithm_finished = True
+
+            self.decision_history.append(
+                "Finalización: no quedan vértices sin procesar."
+            )
+
             return self.labels.copy()
 
         self.current_node = next_node
-
         self.iteration += 1
-
         self.processed_nodes.append(next_node)
 
         current_distance = self.labels[next_node][0]
 
-        for neighbor in self.get_successors(next_node):
+        if current_distance == float("inf"):
+
+            self.decision_history.append(
+                f"\nIteración {self.iteration}: se selecciona "
+                f"{next_node} con distancia ∞."
+            )
+
+            self.decision_history.append(
+                f"{next_node} es inalcanzable desde el origen. "
+                "Se revisa sin calcular distancias desde ∞."
+            )
+
+            neighbors = []
+
+        else:
+
+            self.decision_history.append(
+                f"\nIteración {self.iteration}: se selecciona "
+                f"{next_node} con distancia "
+                f"{int(current_distance)}."
+            )
+
+            neighbors = self.get_successors(next_node)
+
+        for neighbor in neighbors:
 
             if neighbor in self.processed_nodes:
+                self.decision_history.append(
+                    f"Arista {next_node} -> {neighbor}: "
+                    "el vértice destino ya fue procesado."
+                )
+
                 continue
 
             weight = self.get_edge_weight(
@@ -236,26 +712,36 @@ class GraphModel:
             if candidate_distance < current_distance_neighbor:
 
                 if current_distance_neighbor != float("inf"):
-                    old_distance, old_predecessor, old_iteration = (
-                        self.labels[neighbor]
-                    )
 
-                    self.label_history[neighbor].append(
-                        (
-                            old_distance,
-                            old_predecessor,
-                            old_iteration,
-                            True
-                        )
-                    )
+                    history = self.label_history[neighbor]
 
-                new_label = (
+                    for history_index, old_label in enumerate(history):
+                        if (
+                                old_label[0] == current_distance_neighbor
+                                and not old_label[3]
+                        ):
+                            history[history_index] = (
+                                old_label[0],
+                                old_label[1],
+                                old_label[2],
+                                True
+                            )
+
+                previous_distance_text = (
+                    "∞"
+                    if current_distance_neighbor == float("inf")
+                    else str(int(current_distance_neighbor))
+                )
+
+                self.labels[neighbor] = (
                     candidate_distance,
                     next_node,
                     self.iteration
                 )
 
-                self.labels[neighbor] = new_label
+                self.optimal_predecessors[neighbor] = [
+                    next_node
+                ]
 
                 self.label_history[neighbor].append(
                     (
@@ -266,21 +752,85 @@ class GraphModel:
                     )
                 )
 
+                self.decision_history.append(
+                    f"Arista {next_node} -> {neighbor}, "
+                    f"peso {weight}: "
+                    f"{int(current_distance)} + {weight} = "
+                    f"{int(candidate_distance)}. "
+                    f"Distancia anterior: {previous_distance_text}. "
+                    "Se actualiza la etiqueta."
+                )
+
+            elif candidate_distance == current_distance_neighbor:
+
+                if (
+                        next_node
+                        not in self.optimal_predecessors[neighbor]
+                ):
+
+                    self.optimal_predecessors[neighbor].append(
+                        next_node
+                    )
+
+                    self.label_history[neighbor].append(
+                        (
+                            candidate_distance,
+                            next_node,
+                            self.iteration,
+                            False
+                        )
+                    )
+
+                    self.decision_history.append(
+                        f"Arista {next_node} -> {neighbor}, "
+                        f"peso {weight}: "
+                        f"{int(current_distance)} + {weight} = "
+                        f"{int(candidate_distance)}. "
+                        "Se encuentra una ruta con igual distancia "
+                        "mínima. Se registra el predecesor alternativo "
+                        f"{next_node}."
+                    )
+
+                else:
+                    self.decision_history.append(
+                        f"Arista {next_node} -> {neighbor}: "
+                        "la alternativa óptima ya está registrada."
+                    )
+
+            else:
+                self.decision_history.append(
+                    f"Arista {next_node} -> {neighbor}, "
+                    f"peso {weight}: "
+                    f"{int(current_distance)} + {weight} = "
+                    f"{int(candidate_distance)}. "
+                    f"La distancia conocida es "
+                    f"{int(current_distance_neighbor)}. "
+                    "Se conserva la etiqueta anterior."
+                )
+
         remaining_nodes = [
             node
             for node in self.graph.nodes
             if node not in self.processed_nodes
-            and self.labels[node][0] != float("inf")
         ]
 
         if not remaining_nodes:
+
             self.algorithm_finished = True
 
-        if (
-            self.target is not None
-            and self.target in self.processed_nodes
-        ):
-            self.algorithm_finished = True
+            self.decision_history.append(
+                "Finalización: todos los vértices fueron revisados. "
+                "Los que conservan distancia ∞ son inalcanzables "
+                "desde el origen."
+            )
+
+        else:
+
+            self.decision_history.append(
+                f"Fin de la iteración {self.iteration}. "
+                "Se continuará con el vértice pendiente "
+                "de menor distancia."
+            )
 
         return self.labels.copy()
 
@@ -288,32 +838,48 @@ class GraphModel:
         return nx.is_directed_acyclic_graph(self.graph)
 
     def get_shortest_path(self) -> List[str]:
+
+        paths = self.get_shortest_paths()
+
+        if not paths:
+            return []
+
+        return paths[0]
+
+    def get_shortest_paths(self) -> List[List[str]]:
+
         if self.source is None or self.target is None:
             return []
 
         if self.labels[self.target][0] == float("inf"):
             return []
 
-        path = []
+        def build_paths(node: str) -> List[List[str]]:
 
-        current = self.target
+            if node == self.source:
 
-        while current is not None:
-            path.append(current)
+                return [[self.source]]
 
-            predecessor = self.labels[current][1]
+            paths = []
 
-            if predecessor is None:
-                break
+            predecessors = self.optimal_predecessors.get(
+                node,
+                []
+            )
 
-            current = predecessor
+            for predecessor in predecessors:
 
-        path.reverse()
+                previous_paths = build_paths(predecessor)
 
-        if not path or path[0] != self.source:
-            return []
+                for path in previous_paths:
 
-        return path
+                    paths.append(
+                        path + [node]
+                    )
+
+            return paths
+
+        return build_paths(self.target)
 
     def get_shortest_distance(self) -> Optional[int]:
         if self.target is None:
@@ -337,13 +903,18 @@ class MainApplication:
             "Problema del Camino Mínimo"
         )
 
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        window_width = min(1450, screen_width - 40)
+        window_height = min(900, screen_height - 100)
+        window_x = max(0, (screen_width - window_width) // 2)
+        window_y = max(0, (screen_height - window_height) // 2)
         self.root.geometry(
-            "1450x900"
+            f"{window_width}x{window_height}+{window_x}+{window_y}"
         )
-
         self.root.minsize(
-            1200,
-            760
+            min(1000, window_width),
+            min(600, window_height)
         )
 
         self.configure_style()
@@ -383,6 +954,10 @@ class MainApplication:
             tk.Text
         ] = None
 
+        self.history_text: Optional[tk.Text] = None
+
+        self.decisions_text: Optional[tk.Text] = None
+
         self.canvas: Optional[
             FigureCanvasTkAgg
         ] = None
@@ -390,6 +965,14 @@ class MainApplication:
         self.figure: Optional[
             Figure
         ] = None
+
+        self.graph_axis: Optional[Any] = None
+
+        self.toolbar: Optional[
+            NavigationToolbar2Tk
+        ] = None
+
+        self.reset_graph_view = False
 
         self.next_button: Optional[
             ttk.Button
@@ -440,7 +1023,7 @@ class MainApplication:
         )
 
         project_menu.add_command(
-            label="Nuevo grafo",
+            label="Generar nuevo grafo",
             command=self.generate_graph
         )
 
@@ -450,12 +1033,12 @@ class MainApplication:
         )
 
         project_menu.add_command(
-            label="Siguiente paso",
+            label="Ejecutar siguiente paso",
             command=self.execute_next_step
         )
 
         project_menu.add_command(
-            label="Ejecutar hasta terminar",
+            label="Ejecutar algoritmo completo",
             command=self.execute_until_finished
         )
 
@@ -476,18 +1059,33 @@ class MainApplication:
             command=self.show_project_information
         )
 
+        view_menu = tk.Menu(
+            menu_bar,
+            tearoff=0
+        )
+
+        view_menu.add_command(
+            label="Restablecer vista del grafo",
+            command=self.reset_graph_zoom
+        )
+
+        menu_bar.add_cascade(
+            label="Vista",
+            menu=view_menu
+        )
+
         help_menu = tk.Menu(
             menu_bar,
             tearoff=0
         )
 
         help_menu.add_command(
-            label="Qué hace el sistema",
+            label="Descripción del sistema",
             command=lambda: self.show_help(0)
         )
 
         help_menu.add_command(
-            label="Cómo usar el sistema",
+            label="Guía de uso",
             command=lambda: self.show_help(1)
         )
 
@@ -497,7 +1095,7 @@ class MainApplication:
         )
 
         help_menu.add_command(
-            label="Etiquetas y conceptos",
+            label="Etiquetas y conceptos de Dijkstra",
             command=lambda: self.show_help(3)
         )
 
@@ -725,7 +1323,7 @@ class MainApplication:
 
         workspace.columnconfigure(
             0,
-            weight=4
+            weight=5
         )
 
         workspace.columnconfigure(
@@ -791,13 +1389,13 @@ class MainApplication:
         )
 
     def create_labels_panel(
-        self,
-        parent: ttk.Frame
+            self,
+            parent: ttk.Frame
     ) -> None:
 
         labels_frame = ttk.LabelFrame(
             parent,
-            text="Etiquetas de Dijkstra",
+            text="Etiquetas y decisiones de Dijkstra",
             padding=8,
             style="Section.TLabelframe"
         )
@@ -810,10 +1408,8 @@ class MainApplication:
         ttk.Label(
             labels_frame,
             text=(
-                "[L, X]_k | "
-                "L = distancia | "
-                "X = predecesor | "
-                "k = iteración"
+                "L = distancia acumulada | "
+                "X = predecesor | k = iteración"
             ),
             font=("Segoe UI", 9)
         ).pack(
@@ -821,44 +1417,99 @@ class MainApplication:
             pady=(0, 6)
         )
 
-        text_frame = ttk.Frame(
+        notebook = ttk.Notebook(
             labels_frame
         )
 
-        text_frame.pack(
+        notebook.pack(
             fill="both",
             expand=True
         )
 
-        scrollbar = ttk.Scrollbar(
-            text_frame,
-            orient="vertical"
+        current_tab = ttk.Frame(
+            notebook,
+            padding=4
         )
 
-        scrollbar.pack(
-            side="right",
-            fill="y"
+        history_tab = ttk.Frame(
+            notebook,
+            padding=4
         )
 
-        self.labels_text = tk.Text(
-            text_frame,
-            width=42,
-            height=25,
-            state="disabled",
-            font=("Consolas", 10),
-            yscrollcommand=scrollbar.set,
-            padx=8,
-            pady=8
+        decisions_tab = ttk.Frame(
+            notebook,
+            padding=4
         )
 
-        self.labels_text.pack(
-            side="left",
-            fill="both",
-            expand=True
+        notebook.add(
+            current_tab,
+            text="Etiquetas actuales"
         )
 
-        scrollbar.config(
-            command=self.labels_text.yview
+        notebook.add(
+            history_tab,
+            text="Historial"
+        )
+
+        notebook.add(
+            decisions_tab,
+            text="Decisiones"
+        )
+
+        def create_text_area(
+                tab: ttk.Frame
+        ) -> tk.Text:
+            text_frame = ttk.Frame(
+                tab
+            )
+
+            text_frame.pack(
+                fill="both",
+                expand=True
+            )
+
+            scrollbar = ttk.Scrollbar(
+                text_frame,
+                orient="vertical"
+            )
+
+            scrollbar.pack(
+                side="right",
+                fill="y"
+            )
+
+            text_widget = tk.Text(
+                text_frame,
+                wrap="word",
+                state="disabled",
+                font=("Consolas", 9),
+                yscrollcommand=scrollbar.set,
+                padx=8,
+                pady=8
+            )
+
+            text_widget.pack(
+                side="left",
+                fill="both",
+                expand=True
+            )
+
+            scrollbar.config(
+                command=text_widget.yview
+            )
+
+            return text_widget
+
+        self.labels_text = create_text_area(
+            current_tab
+        )
+
+        self.history_text = create_text_area(
+            history_tab
+        )
+
+        self.decisions_text = create_text_area(
+            decisions_tab
         )
 
     def validate_node_count(self) -> Optional[int]:
@@ -905,6 +1556,7 @@ class MainApplication:
         node_count = self.validate_node_count()
 
         if node_count is None:
+
             return
 
         mode = self.mode_var.get()
@@ -950,6 +1602,8 @@ class MainApplication:
             self.target_var.set(
                 nodes[-1]
             )
+
+        self.reset_graph_view = True
 
         self.display_graph()
         self.clear_labels()
@@ -1168,7 +1822,6 @@ class MainApplication:
                     "Seleccione origen y destino.",
                     parent=window
                 )
-
                 return
 
             if source == target:
@@ -1178,33 +1831,27 @@ class MainApplication:
                     "El origen y destino deben ser distintos.",
                     parent=window
                 )
-
                 return
 
             try:
-
                 weight = int(
                     weight_text
                 )
 
             except ValueError:
-
                 messagebox.showerror(
                     "Peso inválido",
                     "El peso debe ser un número entero.",
                     parent=window
                 )
-
                 return
 
             if weight <= 0:
-
                 messagebox.showerror(
                     "Peso inválido",
                     "El peso debe ser positivo.",
                     parent=window
                 )
-
                 return
 
             if (
@@ -1218,7 +1865,6 @@ class MainApplication:
                     "La arista ya fue ingresada.",
                     parent=window
                 )
-
                 return
 
             for old_source, old_target, _ in edges:
@@ -1233,7 +1879,6 @@ class MainApplication:
                         "Ya existe esa conexión.",
                         parent=window
                     )
-
                     return
 
             test_graph = nx.DiGraph()
@@ -1304,22 +1949,27 @@ class MainApplication:
         def finish_manual_graph() -> None:
 
             if not edges:
-
                 messagebox.showwarning(
                     "Grafo vacío",
                     "Ingrese al menos una arista.",
                     parent=window
                 )
-
                 return
 
-            self.graph_model.create_manual_graph(
-                node_count,
-                edges
-            )
+            try:
+                self.graph_model.create_manual_graph(
+                    node_count,
+                    edges
+                )
+            except ValueError as error:
+                messagebox.showerror(
+                    "Grafo inválido",
+                    str(error),
+                    parent=window
+                )
+                return
 
             window.destroy()
-
             self.finish_graph_generation()
 
         ttk.Button(
@@ -1362,60 +2012,463 @@ class MainApplication:
         )
 
     def calculate_positions(
-        self
+            self
     ) -> Dict[str, Tuple[float, float]]:
 
-        nodes = self.graph_model.get_nodes()
-
+        graph = self.graph_model.graph
+        nodes = list(graph.nodes)
         node_count = len(nodes)
 
-        if node_count <= 8:
-            columns = 4
-        elif node_count <= 12:
-            columns = 5
-        else:
-            columns = 6
+        if node_count == 0:
+            return {}
 
-        positions: Dict[
-            str,
-            Tuple[float, float]
-        ] = {}
+        if node_count == 1:
+            return {nodes[0]: (8.0, 5.0)}
 
-        for index, node in enumerate(nodes):
+        rng = random.Random(self.graph_model.layout_seed)
 
-            column = index % columns
-            row = index // columns
+        try:
+            node_rank = {
+                node: idx for idx, node in enumerate(nodes)
+            }
+            topo_nodes = list(
+                nx.lexicographical_topological_sort(
+                    graph,
+                    key=lambda n: node_rank.get(n, 0)
+                )
+            )
+        except nx.NetworkXUnfeasible:
+            topo_nodes = list(nodes)
 
-            x = float(column) * 2.4
-            y = float(-row) * 2.2
+        zones_coords = self.graph_model.build_base_2d_slots(
+            node_count,
+            rng
+        )
+        zones_nodes: List[List[str]] = []
+        cursor = 0
 
-            if row % 2 == 1:
-                y -= 0.5
+        for zone_pts in zones_coords:
+            k = len(zone_pts)
+            zones_nodes.append(
+                list(topo_nodes[cursor : cursor + k])
+            )
+            cursor += k
 
-            positions[node] = (
-                x,
-                y
+        positions: Dict[str, List[float]] = {}
+        for z_idx, zone_pts in enumerate(zones_coords):
+            for i, u in enumerate(zones_nodes[z_idx]):
+                positions[u] = [
+                    zone_pts[i][0],
+                    zone_pts[i][1]
+                ]
+
+        edges = list(graph.edges)
+
+        for _sweep in range(4):
+            for z_idx in range(len(zones_coords)):
+                z_nodes = zones_nodes[z_idx]
+                z_pts = zones_coords[z_idx]
+                k = len(z_nodes)
+
+                if k <= 1:
+                    continue
+
+                best_perm = tuple(range(k))
+                best_cost = float("inf")
+
+                for perm in itertools.permutations(range(k)):
+                    for idx_in_zone, pt_idx in enumerate(perm):
+                        u = z_nodes[idx_in_zone]
+                        positions[u][0], positions[u][1] = (
+                            z_pts[pt_idx]
+                        )
+
+                    cost = 0.0
+
+                    for u, v in edges:
+                        p1 = (positions[u][0], positions[u][1])
+                        p2 = (positions[v][0], positions[v][1])
+                        dist = math.hypot(
+                            p2[0] - p1[0],
+                            p2[1] - p1[1]
+                        )
+                        cost += dist * 1.2
+                        if p2[0] < p1[0] + 0.3:
+                            cost += (p1[0] + 0.3 - p2[0]) * 8.0
+
+                    for idx1 in range(len(edges)):
+                        u1, v1 = edges[idx1]
+                        if (
+                            u1 not in z_nodes
+                            and v1 not in z_nodes
+                        ):
+                            continue
+                        p1 = (
+                            positions[u1][0],
+                            positions[u1][1]
+                        )
+                        p2 = (
+                            positions[v1][0],
+                            positions[v1][1]
+                        )
+                        for idx2 in range(idx1 + 1, len(edges)):
+                            u2, v2 = edges[idx2]
+                            if u1 in (u2, v2) or v1 in (u2, v2):
+                                continue
+                            p3 = (
+                                positions[u2][0],
+                                positions[u2][1]
+                            )
+                            p4 = (
+                                positions[v2][0],
+                                positions[v2][1]
+                            )
+                            if self.graph_model.segments_intersect(
+                                p1,
+                                p2,
+                                p3,
+                                p4
+                            ):
+                                cost += 35.0
+
+                    if cost < best_cost:
+                        best_cost = cost
+                        best_perm = perm
+
+                for idx_in_zone, pt_idx in enumerate(best_perm):
+                    u = z_nodes[idx_in_zone]
+                    positions[u][0], positions[u][1] = (
+                        z_pts[pt_idx]
+                    )
+
+        width = 16.0
+        height = 10.0
+        x_margin = 1.2
+        y_margin = 1.0
+        min_node_dist = 2.65 if node_count <= 12 else 2.30
+        ideal_edge_len = 3.6
+
+        for iteration in range(85):
+            temp = 0.12 * (1.0 - iteration / 85.0)
+            forces = {u: [0.0, 0.0] for u in nodes}
+
+            for i in range(node_count):
+                u = nodes[i]
+                ux, uy = positions[u]
+                for j in range(i + 1, node_count):
+                    v = nodes[j]
+                    vx, vy = positions[v]
+                    dx = ux - vx
+                    dy = uy - vy
+                    dist = math.hypot(dx, dy)
+                    if dist < 1e-4:
+                        dx, dy, dist = 0.1, 0.1, 0.14
+                    if dist < min_node_dist * 1.35:
+                        rep = (
+                            (min_node_dist * 1.35 - dist) ** 2
+                            * 1.9
+                            / dist
+                        )
+                        forces[u][0] += dx * rep
+                        forces[u][1] += dy * rep * 1.2
+                        forces[v][0] -= dx * rep
+                        forces[v][1] -= dy * rep * 1.2
+
+            for u, v in edges:
+                ux, uy = positions[u]
+                vx, vy = positions[v]
+                dx = vx - ux
+                dy = vy - uy
+                dist = math.hypot(dx, dy)
+                if dist > 1e-4:
+                    diff = (dist - ideal_edge_len) * 0.08
+                    fx = (dx / dist) * diff
+                    fy = (dy / dist) * diff
+                    forces[u][0] += fx
+                    forces[u][1] += fy
+                    forces[v][0] -= fx
+                    forces[v][1] -= fy
+                if dx < 1.1:
+                    push_x = (1.1 - dx) * 0.65
+                    forces[u][0] -= push_x
+                    forces[v][0] += push_x
+
+            clearance_dist = 1.35
+            for u, v in edges:
+                x1, y1 = positions[u]
+                x2, y2 = positions[v]
+                seg_dx = x2 - x1
+                seg_dy = y2 - y1
+                seg_len_sq = seg_dx * seg_dx + seg_dy * seg_dy
+                if seg_len_sq < 1e-4:
+                    continue
+                for w in nodes:
+                    if w == u or w == v:
+                        continue
+                    wx, wy = positions[w]
+                    t = (
+                        (wx - x1) * seg_dx + (wy - y1) * seg_dy
+                    ) / seg_len_sq
+                    if 0.08 < t < 0.92:
+                        proj_x = x1 + t * seg_dx
+                        proj_y = y1 + t * seg_dy
+                        odx = wx - proj_x
+                        ody = wy - proj_y
+                        odist = math.hypot(odx, ody)
+                        if odist < clearance_dist:
+                            if odist < 1e-4:
+                                seg_len = math.sqrt(seg_len_sq)
+                                odx = -seg_dy / seg_len
+                                ody = seg_dx / seg_len
+                                odist = 0.01
+                            push = (
+                                (clearance_dist - odist)
+                                * 2.4
+                                / odist
+                            )
+                            forces[w][0] += odx * push
+                            forces[w][1] += ody * push
+                            forces[u][0] -= odx * push * 0.2
+                            forces[u][1] -= ody * push * 0.2
+                            forces[v][0] -= odx * push * 0.2
+                            forces[v][1] -= ody * push * 0.2
+
+            for u in nodes:
+                fx, fy = forces[u]
+                mag = math.hypot(fx, fy)
+                if mag > 1.0:
+                    fx /= mag
+                    fy /= mag
+                positions[u][0] = max(
+                    x_margin,
+                    min(
+                        width - x_margin,
+                        positions[u][0] + fx * temp
+                    )
+                )
+                positions[u][1] = max(
+                    y_margin,
+                    min(
+                        height - y_margin,
+                        positions[u][1] + fy * temp
+                    )
+                )
+
+        xs = [p[0] for p in positions.values()]
+        ys = [p[1] for p in positions.values()]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        span_x = max(1e-3, max_x - min_x)
+        span_y = max(1e-3, max_y - min_y)
+
+        final_positions: Dict[str, Tuple[float, float]] = {}
+        for u, (px, py) in positions.items():
+            nx_coord = ((px - min_x) / span_x) * 14.0 + 1.0
+            ny_coord = ((py - min_y) / span_y) * 8.4 + 0.8
+            final_positions[u] = (
+                float(nx_coord),
+                float(ny_coord)
             )
 
-        return positions
+        return final_positions
+
+    @staticmethod
+    def compute_smart_curvatures_and_labels(
+        graph: nx.DiGraph,
+        positions: Dict[str, Tuple[float, float]]
+    ) -> Tuple[
+        Dict[Tuple[str, str], float],
+        Dict[Tuple[str, str], Tuple[float, float]]
+    ]:
+        nodes = list(graph.nodes)
+        edges = list(graph.edges)
+
+        def bezier_point(
+            x1: float,
+            y1: float,
+            x2: float,
+            y2: float,
+            rad: float,
+            t: float
+        ) -> Tuple[float, float]:
+            dx = x2 - x1
+            dy = y2 - y1
+            cx = (x1 + x2) / 2.0 + rad * dy
+            cy = (y1 + y2) / 2.0 - rad * dx
+            rem = 1.0 - t
+            bx = (
+                rem * rem * x1
+                + 2.0 * rem * t * cx
+                + t * t * x2
+            )
+            by = (
+                rem * rem * y1
+                + 2.0 * rem * t * cy
+                + t * t * y2
+            )
+            return bx, by
+
+        edge_curvatures: Dict[Tuple[str, str], float] = {}
+        placed_midpoints: List[Tuple[float, float]] = []
+
+        candidate_rads = [
+            0.0,
+            0.10,
+            -0.10,
+            0.18,
+            -0.18,
+            0.26,
+            -0.26
+        ]
+
+        for u, v in edges:
+            x1, y1 = positions[u]
+            x2, y2 = positions[v]
+            best_rad = 0.0
+            best_cost = float("inf")
+
+            for rad in candidate_rads:
+                cost = abs(rad) * 1.8
+
+                for t in (0.25, 0.4, 0.5, 0.6, 0.75):
+                    bx, by = bezier_point(
+                        x1, y1, x2, y2, rad, t
+                    )
+                    for w in nodes:
+                        if w == u or w == v:
+                            continue
+                        wx, wy = positions[w]
+                        d = math.hypot(bx - wx, by - wy)
+                        if d < 1.35:
+                            cost += (1.35 - d) ** 2 * 30.0
+
+                mx, my = bezier_point(
+                    x1, y1, x2, y2, rad, 0.5
+                )
+                for pmx, pmy in placed_midpoints:
+                    md = math.hypot(mx - pmx, my - pmy)
+                    if md < 0.75:
+                        cost += (0.75 - md) ** 2 * 12.0
+
+                if cost < best_cost:
+                    best_cost = cost
+                    best_rad = rad
+
+            edge_curvatures[(u, v)] = best_rad
+            placed_midpoints.append(
+                bezier_point(x1, y1, x2, y2, best_rad, 0.5)
+            )
+
+        label_coords: Dict[
+            Tuple[str, str],
+            Tuple[float, float]
+        ] = {}
+        placed_labels: List[Tuple[float, float]] = []
+        candidate_ts = [
+            0.50,
+            0.40,
+            0.60,
+            0.33,
+            0.67,
+            0.27,
+            0.73
+        ]
+
+        for u, v in edges:
+            x1, y1 = positions[u]
+            x2, y2 = positions[v]
+            rad = edge_curvatures[(u, v)]
+            best_pt = bezier_point(
+                x1, y1, x2, y2, rad, 0.5
+            )
+            best_cost = float("inf")
+
+            for t in candidate_ts:
+                lx, ly = bezier_point(
+                    x1, y1, x2, y2, rad, t
+                )
+                cost = abs(t - 0.5) * 1.2
+
+                for w in nodes:
+                    wx, wy = positions[w]
+                    d = math.hypot(lx - wx, ly - wy)
+                    if d < 1.15:
+                        cost += (1.15 - d) ** 2 * 40.0
+
+                for plx, ply in placed_labels:
+                    ld = math.hypot(lx - plx, ly - ply)
+                    if ld < 0.85:
+                        cost += (0.85 - ld) ** 2 * 35.0
+
+                if cost < best_cost:
+                    best_cost = cost
+                    best_pt = (lx, ly)
+
+            label_coords[(u, v)] = best_pt
+            placed_labels.append(best_pt)
+
+        return edge_curvatures, label_coords
 
     def display_graph(self) -> None:
 
         if self.graph_frame is None:
             return
 
-        if self.canvas is not None:
+        preserved_xlim = None
+        preserved_ylim = None
 
-            self.canvas.get_tk_widget().destroy()
+        if (
+                self.figure is None
+                or self.canvas is None
+                or self.graph_axis is None
+        ):
 
-        self.figure = Figure(
-            figsize=(9, 7),
-            dpi=100
-        )
+            self.figure = Figure(
+                figsize=(11, 7),
+                dpi=100
+            )
 
-        axis = self.figure.add_subplot(
-            111
-        )
+            self.graph_axis = self.figure.add_subplot(
+                111
+            )
+
+            self.canvas = FigureCanvasTkAgg(
+                self.figure,
+                master=self.graph_frame
+            )
+
+            self.toolbar = BarraHerramientasEspanol(
+                self.canvas,
+                self.graph_frame,
+                pack_toolbar=False
+            )
+
+            self.toolbar.update()
+            self.toolbar.pack(
+                side="top",
+                fill="x"
+            )
+
+            self.canvas.get_tk_widget().pack(
+                side="top",
+                fill="both",
+                expand=True
+            )
+
+        else:
+
+            if not self.reset_graph_view:
+                preserved_xlim = (
+                    self.graph_axis.get_xlim()
+                )
+
+                preserved_ylim = (
+                    self.graph_axis.get_ylim()
+                )
+
+            self.graph_axis.clear()
+
+        axis = self.graph_axis
 
         graph = self.graph_model.graph
 
@@ -1426,9 +2479,84 @@ class MainApplication:
         source = self.graph_model.source
         target = self.graph_model.target
 
+        node_count = len(nodes)
+        edge_count = graph.number_of_edges()
+
+        if node_count <= 10:
+            base_node_size = 1000
+            key_node_size = 1100
+            current_node_size = 1200
+            node_label_size = 10
+
+        elif node_count <= 13:
+            base_node_size = 850
+            key_node_size = 950
+            current_node_size = 1000
+            node_label_size = 9
+
+        else:
+            base_node_size = 750
+            key_node_size = 850
+            current_node_size = 950
+            node_label_size = 9
+
+        if edge_count <= 20:
+            edge_width = 1.4
+            arrow_size = 19
+            weight_font_size = 8
+        else:
+            edge_width = 1.2
+            arrow_size = 16
+            weight_font_size = 8
+
+        highlight_edge_width = (
+            3.2 if edge_count <= 20 else 2.8
+        )
+
+        highlight_arrow_size = (
+            22 if edge_count <= 20 else 19
+        )
+
+        edge_node_sizes = []
+
+        for node in nodes:
+
+            if node == source or node == target:
+                size = key_node_size
+
+            elif (
+                    node == self.graph_model.current_node
+                    and not self.graph_model.algorithm_finished
+            ):
+                size = current_node_size
+
+            else:
+                size = base_node_size
+
+            edge_node_sizes.append(size)
+
         processed = set(
             self.graph_model.processed_nodes
         )
+
+        optimal_edges = set()
+
+        if self.graph_model.algorithm_finished:
+
+            shortest_paths = (
+                self.graph_model.get_shortest_paths()
+            )
+
+            for path in shortest_paths:
+
+                for index in range(len(path) - 1):
+
+                    optimal_edges.add(
+                        (
+                            path[index],
+                            path[index + 1]
+                        )
+                    )
 
         default_nodes = [
             node
@@ -1445,7 +2573,7 @@ class MainApplication:
                 positions,
                 ax=axis,
                 nodelist=default_nodes,
-                node_size=1000,
+                node_size=base_node_size,
                 node_color="#DCE6F1",
                 edgecolors="#2F3B52",
                 linewidths=1.2
@@ -1458,7 +2586,7 @@ class MainApplication:
                 positions,
                 ax=axis,
                 nodelist=[source],
-                node_size=1100,
+                node_size=key_node_size,
                 node_color="#B7E4C7",
                 edgecolors="#1B4332",
                 linewidths=2
@@ -1471,7 +2599,7 @@ class MainApplication:
                 positions,
                 ax=axis,
                 nodelist=[target],
-                node_size=1100,
+                node_size=key_node_size,
                 node_color="#FFD6A5",
                 edgecolors="#9C2C00",
                 linewidths=2
@@ -1491,13 +2619,17 @@ class MainApplication:
                 positions,
                 ax=axis,
                 nodelist=processed_only,
-                node_size=1000,
+                node_size=base_node_size,
                 node_color="#CDE7F0",
                 edgecolors="#16697A",
                 linewidths=2
             )
 
-        if self.graph_model.current_node is not None:
+        if (
+                self.graph_model.current_node is not None
+                and self.graph_model.current_node != source
+                and self.graph_model.current_node != target
+        ):
 
             nx.draw_networkx_nodes(
                 graph,
@@ -1506,7 +2638,7 @@ class MainApplication:
                 nodelist=[
                     self.graph_model.current_node
                 ],
-                node_size=1200,
+                node_size=current_node_size,
                 node_color="#FFF3BF",
                 edgecolors="#8A6D1D",
                 linewidths=3
@@ -1516,42 +2648,75 @@ class MainApplication:
             graph,
             positions,
             ax=axis,
-            font_size=10,
+            font_size=node_label_size,
             font_weight="bold"
         )
 
-        nx.draw_networkx_edges(
-            graph,
-            positions,
-            ax=axis,
-            arrows=True,
-            arrowsize=20,
-            width=1.5,
-            node_size=1000,
-            connectionstyle="arc3,rad=0.08"
+        edge_curvatures, label_coords = (
+            self.compute_smart_curvatures_and_labels(
+                graph,
+                positions
+            )
         )
+
+        for edge in graph.edges:
+            curvature = edge_curvatures[edge]
+
+            nx.draw_networkx_edges(
+                graph,
+                positions,
+                edgelist=[edge],
+                ax=axis,
+                arrows=True,
+                arrowsize=arrow_size,
+                width=edge_width,
+                node_size=edge_node_sizes,
+                nodelist=nodes,
+                connectionstyle=f"arc3,rad={curvature:.3f}"
+            )
+
+        if optimal_edges:
+            for edge in optimal_edges:
+                curvature = edge_curvatures[edge]
+
+                nx.draw_networkx_edges(
+                    graph,
+                    positions,
+                    edgelist=[edge],
+                    ax=axis,
+                    arrows=True,
+                    arrowstyle="-|>",
+                    arrowsize=highlight_arrow_size,
+                    width=highlight_edge_width,
+                    edge_color="#D62828",
+                    node_size=edge_node_sizes,
+                    nodelist=nodes,
+                    connectionstyle=f"arc3,rad={curvature:.3f}"
+                )
 
         edge_labels = nx.get_edge_attributes(
             graph,
             "weight"
         )
 
-        nx.draw_networkx_edge_labels(
-            graph,
-            positions,
-            edge_labels=edge_labels,
-            ax=axis,
-            font_size=9,
-            label_pos=0.5,
-            rotate=False,
-            bbox={
-                "boxstyle": "round,pad=0.18",
-                "fc": "white",
-                "ec": "none",
-                "alpha": 0.9
-            }
-        )
+        for edge, weight in edge_labels.items():
+            label_x, label_y = label_coords[edge]
 
+            axis.text(
+                label_x,
+                label_y,
+                str(weight),
+                fontsize=weight_font_size,
+                horizontalalignment="center",
+                verticalalignment="center",
+                zorder=5,
+                bbox={
+                    "boxstyle": "round,pad=0.22",
+                    "fc": "white",
+                    "ec": "#D9DDE5",
+                    "alpha": 0.95
+                }
+            )
         axis.set_title(
             "Grafo dirigido acíclico ponderado",
             fontsize=14,
@@ -1560,18 +2725,30 @@ class MainApplication:
         )
 
         axis.axis("off")
-        axis.margins(0.20)
+        axis.set_aspect("equal", adjustable="box")
+        axis.margins(0.06)
 
-        self.canvas = FigureCanvasTkAgg(
-            self.figure,
-            master=self.graph_frame
-        )
+        if (
+                preserved_xlim is not None
+                and preserved_ylim is not None
+        ):
+            axis.set_xlim(preserved_xlim)
+            axis.set_ylim(preserved_ylim)
 
-        self.canvas.draw()
+        self.reset_graph_view = False
 
-        self.canvas.get_tk_widget().pack(
-            fill="both",
-            expand=True
+        if self.canvas is not None:
+            self.canvas.draw()
+
+    def reset_graph_zoom(self):
+        if self.graph_model.graph.number_of_nodes() == 0:
+            return
+
+        self.reset_graph_view = True
+        self.display_graph()
+
+        self.status_var.set(
+            "Vista completa del grafo restablecida."
         )
 
     def initialize_algorithm(self) -> None:
@@ -1654,7 +2831,6 @@ class MainApplication:
             self.show_final_result()
 
         else:
-
             self.status_var.set(
                 f"Iteración {iteration} | "
                 f"Vértice seleccionado: {current_node}"
@@ -1668,7 +2844,9 @@ class MainApplication:
                 "Algoritmo no inicializado",
                 "Primero inicialice Dijkstra."
             )
+            return
 
+        if self.graph_model.algorithm_finished:
             return
 
         while not self.graph_model.algorithm_finished:
@@ -1682,12 +2860,11 @@ class MainApplication:
 
     def show_final_result(self) -> None:
 
-        path = self.graph_model.get_shortest_path()
+        paths = self.graph_model.get_shortest_paths()
 
         distance = self.graph_model.get_shortest_distance()
 
-        if not path or distance is None:
-
+        if not paths or distance is None:
             self.status_var.set(
                 "No existe un camino desde el origen hasta el destino."
             )
@@ -1697,48 +2874,282 @@ class MainApplication:
                 "No existe un camino alcanzable "
                 "desde el origen hasta el destino."
             )
-
             return
-
-        path_text = " → ".join(
-            path
-        )
 
         self.status_var.set(
             f"Algoritmo terminado | "
             f"Distancia mínima: {distance} | "
-            f"Camino: {path_text}"
+            f"Caminos mínimos: {len(paths)}"
         )
 
-        messagebox.showinfo(
-            "Camino mínimo",
-            (
-                f"Distancia mínima: {distance}\n\n"
-                f"Camino mínimo:\n{path_text}"
+        result_window = tk.Toplevel(
+            self.root
+        )
+
+        result_window.title(
+            "Resultado de caminos mínimos"
+        )
+
+        result_window.geometry(
+            "760x560"
+        )
+
+        result_window.minsize(
+            620,
+            420
+        )
+
+        result_window.transient(
+            self.root
+        )
+
+        container = ttk.Frame(
+            result_window,
+            padding=14
+        )
+
+        container.pack(
+            fill="both",
+            expand=True
+        )
+
+        ttk.Label(
+            container,
+            text="Resultado del algoritmo de Dijkstra",
+            font=("Segoe UI", 17, "bold")
+        ).pack(
+            anchor="w",
+            pady=(0, 12)
+        )
+
+        ttk.Label(
+            container,
+            text=f"Distancia mínima: {distance}",
+            font=("Segoe UI", 12, "bold")
+        ).pack(
+            anchor="w",
+            pady=3
+        )
+
+        ttk.Label(
+            container,
+            text=f"Cantidad de caminos mínimos: {len(paths)}",
+            font=("Segoe UI", 12, "bold")
+        ).pack(
+            anchor="w",
+            pady=(3, 12)
+        )
+
+        result_frame = ttk.LabelFrame(
+            container,
+            text="Caminos mínimos encontrados",
+            padding=8
+        )
+
+        result_frame.pack(
+            fill="both",
+            expand=True
+        )
+
+        text_frame = ttk.Frame(
+            result_frame
+        )
+
+        text_frame.pack(
+            fill="both",
+            expand=True
+        )
+
+        scrollbar = ttk.Scrollbar(
+            text_frame,
+            orient="vertical"
+        )
+
+        scrollbar.pack(
+            side="right",
+            fill="y"
+        )
+
+        results_text = tk.Text(
+            text_frame,
+            wrap="word",
+            font=("Consolas", 10),
+            yscrollcommand=scrollbar.set,
+            padx=8,
+            pady=8
+        )
+
+        results_text.pack(
+            side="left",
+            fill="both",
+            expand=True
+        )
+
+        scrollbar.config(
+            command=results_text.yview
+        )
+
+        for index, path in enumerate(
+                paths,
+                start=1
+        ):
+            path_text = " → ".join(path)
+
+            results_text.insert(
+                tk.END,
+                f"Camino {index}: {path_text}\n\n"
             )
+
+        results_text.config(
+            state="disabled"
+        )
+
+        ttk.Button(
+            container,
+            text="Cerrar",
+            command=result_window.destroy
+        ).pack(
+            anchor="e",
+            pady=(12, 0)
         )
 
     def update_labels_view(self) -> None:
 
-        if self.labels_text is None:
+        if (
+                self.labels_text is None
+                or self.history_text is None
+                or self.decisions_text is None
+        ):
             return
 
-        self.labels_text.config(
-            state="normal"
-        )
+        for text_widget in (
+                self.labels_text,
+                self.history_text,
+                self.decisions_text
+        ):
+            text_widget.config(
+                state="normal"
+            )
 
-        self.labels_text.delete(
-            "1.0",
-            tk.END
+            text_widget.delete(
+                "1.0",
+                tk.END
+            )
+
+        nodes = self.graph_model.get_nodes()
+
+        processed = set(
+            self.graph_model.processed_nodes
         )
 
         self.labels_text.insert(
             tk.END,
-            "ESTADO ACTUAL\n"
-            "══════════════════════════════════════\n\n"
+            "ETIQUETAS ACTUALES POR VÉRTICE\n"
+            "================================\n\n"
         )
 
-        for node in self.graph_model.get_nodes():
+        for node in nodes:
+
+            distance, predecessor, iteration = (
+                self.graph_model.labels.get(
+                    node,
+                    (float("inf"), None, 0)
+                )
+            )
+
+            distance_text = (
+                "∞"
+                if distance == float("inf")
+                else str(int(distance))
+            )
+
+            predecessor_text = (
+                predecessor
+                if predecessor is not None
+                else "-"
+            )
+
+            if node == self.graph_model.source:
+                status = "Origen"
+
+            elif (
+                    node == self.graph_model.target
+                    and self.graph_model.algorithm_finished
+                    and distance != float("inf")
+            ):
+                status = "Destino alcanzado"
+
+            elif (
+                    node == self.graph_model.current_node
+                    and not self.graph_model.algorithm_finished
+            ):
+                status = "Vértice actual"
+
+
+            elif (
+
+                    distance == float("inf")
+
+                    and node in processed
+
+            ):
+
+                status = "Inalcanzable desde el origen"
+
+
+            elif node in processed:
+
+                status = "Procesado"
+
+
+            elif distance == float("inf"):
+
+                status = "Distancia ∞ (pendiente)"
+
+            elif node == self.graph_model.target:
+                status = "Destino pendiente"
+
+            else:
+                status = "Pendiente"
+
+            self.labels_text.insert(
+                tk.END,
+                f"{node}\n"
+                f"  Etiqueta: [{distance_text}, "
+                f"{predecessor_text}]_{iteration}\n"
+                f"  Estado: {status}\n\n"
+            )
+
+        self.labels_text.insert(
+            tk.END,
+            "LEYENDA\n"
+            "=======\n"
+            "∞ = distancia infinita desde el origen\n"
+            "Origen = vértice de partida\n"
+            "Destino alcanzado = solución encontrada\n"
+            "Procesado = vértice ya examinado\n"
+            "Pendiente = vértice por examinar\n"
+            "Inalcanzable = no existe ruta desde el origen\n"
+        )
+
+        self.history_text.insert(
+            tk.END,
+            "HISTORIAL DE ETIQUETAS\n"
+            "=====================\n\n"
+        )
+
+        self.history_text.tag_config(
+            "crossed",
+            foreground="#A00000",
+            overstrike=True
+        )
+
+        for node in nodes:
+
+            self.history_text.insert(
+                tk.END,
+                f"{node}\n"
+            )
 
             history = (
                 self.graph_model.label_history.get(
@@ -1748,30 +3159,25 @@ class MainApplication:
             )
 
             if not history:
-
-                self.labels_text.insert(
+                self.history_text.insert(
                     tk.END,
-                    f"{node:<5} [∞, -]_0\n"
+                    "  [∞, -]_0 "
+                    "(sin distancia finita registrada)\n\n"
                 )
-
                 continue
 
             for (
-                distance,
-                predecessor,
-                iteration,
-                crossed
+                    distance,
+                    predecessor,
+                    iteration,
+                    crossed
             ) in history:
 
-                if distance == float("inf"):
-
-                    distance_text = "∞"
-
-                else:
-
-                    distance_text = str(
-                        int(distance)
-                    )
+                distance_text = (
+                    "∞"
+                    if distance == float("inf")
+                    else str(int(distance))
+                )
 
                 predecessor_text = (
                     predecessor
@@ -1779,112 +3185,155 @@ class MainApplication:
                     else "-"
                 )
 
-                text = (
-                    f"{node:<5} "
-                    f"[{distance_text}, "
+                label_text = (
+                    f"  [{distance_text}, "
                     f"{predecessor_text}]_{iteration}"
                 )
 
                 if crossed:
+                    label_text += " (reemplazada)"
 
-                    self.labels_text.insert(
-                        tk.END,
-                        "   ~~ "
-                    )
+                start = self.history_text.index(
+                    tk.END
+                )
 
-                    start = self.labels_text.index(
-                        tk.END
-                    )
+                self.history_text.insert(
+                    tk.END,
+                    label_text + "\n"
+                )
 
-                    self.labels_text.insert(
-                        tk.END,
-                        text
-                    )
+                end = self.history_text.index(
+                    tk.END
+                )
 
-                    end = self.labels_text.index(
-                        tk.END
-                    )
-
-                    self.labels_text.tag_add(
+                if crossed:
+                    self.history_text.tag_add(
                         "crossed",
                         start,
                         end
                     )
 
-                    self.labels_text.insert(
+            self.history_text.insert(
+                tk.END,
+                "\n"
+            )
+
+        self.history_text.insert(
+            tk.END,
+            "Las etiquetas en rojo y tachadas "
+            "fueron reemplazadas por una distancia menor."
+        )
+
+        self.decisions_text.insert(
+            tk.END,
+            "REGISTRO DE DECISIONES DEL ALGORITMO\n"
+            "====================================\n\n"
+        )
+
+        if not self.graph_model.decision_history:
+
+            self.decisions_text.insert(
+                tk.END,
+                "Todavía no hay decisiones registradas. "
+                "Inicialice Dijkstra para comenzar.\n"
+            )
+
+        else:
+            for index, decision in enumerate(
+                    self.graph_model.decision_history,
+                    start=1
+            ):
+
+                decision_text = decision.strip()
+
+                if decision_text:
+                    self.decisions_text.insert(
                         tk.END,
-                        " ~~\n"
+                        f"DECISIÓN {index}\n"
+                        f"{decision_text}\n\n"
                     )
 
-                else:
+        for text_widget in (
+                self.labels_text,
+                self.history_text,
+                self.decisions_text
+        ):
+            text_widget.config(
+                state="disabled"
+            )
 
-                    self.labels_text.insert(
-                        tk.END,
-                        f"   {text}\n"
-                    )
-
-        self.labels_text.insert(
-            tk.END,
-            "\n"
-        )
-
-        self.labels_text.insert(
-            tk.END,
-            "══════════════════════════════════════\n"
-        )
-
-        self.labels_text.insert(
-            tk.END,
-            "Leyenda\n"
-        )
-
-        self.labels_text.insert(
-            tk.END,
-            "L = distancia acumulada\n"
-        )
-
-        self.labels_text.insert(
-            tk.END,
-            "X = predecesor\n"
-        )
-
-        self.labels_text.insert(
-            tk.END,
-            "k = iteración\n"
-        )
-
-        self.labels_text.insert(
-            tk.END,
-            "~~ ~~ = etiqueta reemplazada\n"
-        )
-
-        self.labels_text.tag_config(
-            "crossed",
-            foreground="#A00000",
-            overstrike=True
-        )
-
-        self.labels_text.config(
-            state="disabled"
-        )
+        self.labels_text.see("1.0")
+        self.history_text.see("1.0")
+        self.decisions_text.see(tk.END)
 
     def clear_labels(self) -> None:
 
-        if self.labels_text is None:
-            return
+        for text_widget in (
+                self.labels_text,
+                self.history_text,
+                self.decisions_text
+        ):
 
-        self.labels_text.config(
-            state="normal"
-        )
+            if text_widget is None:
+                continue
 
-        self.labels_text.delete(
-            "1.0",
-            tk.END
-        )
+            text_widget.config(
+                state="normal"
+            )
 
-        self.labels_text.config(
-            state="disabled"
-        )
+            text_widget.delete(
+                "1.0",
+                tk.END
+            )
+
+            text_widget.config(
+                state="disabled"
+            )
+
+        if self.labels_text is not None:
+            self.labels_text.config(
+                state="normal"
+            )
+
+            self.labels_text.insert(
+                tk.END,
+                "Genere el grafo, seleccione el origen "
+                "y el destino, e inicialice Dijkstra."
+            )
+
+            self.labels_text.config(
+                state="disabled"
+            )
+
+        if self.history_text is not None:
+            self.history_text.config(
+                state="normal"
+            )
+
+            self.history_text.insert(
+                tk.END,
+                "El historial se mostrará cuando "
+                "se inicialice Dijkstra."
+            )
+
+            self.history_text.config(
+                state="disabled"
+            )
+
+        if self.decisions_text is not None:
+            self.decisions_text.config(
+                state="normal"
+            )
+
+            self.decisions_text.insert(
+                tk.END,
+                "El registro de decisiones aparecerá "
+                "al inicializar el algoritmo."
+            )
+
+            self.decisions_text.config(
+                state="disabled"
+            )
 
     def show_project_information(self) -> None:
 
@@ -1897,12 +3346,12 @@ class MainApplication:
         )
 
         information_window.geometry(
-            "650x520"
+            "720x680"
         )
 
         information_window.minsize(
-            600,
-            470
+            680,
+            620
         )
 
         information_window.transient(
@@ -1919,10 +3368,49 @@ class MainApplication:
             expand=True
         )
 
+        style = ttk.Style(information_window)
+
+        style.configure(
+            "Project.Title.TLabel",
+            font=("Segoe UI", 18, "bold")
+        )
+
+        style.configure(
+            "Project.Subtitle.TLabel",
+            font=("Segoe UI", 11)
+        )
+
+        style.configure(
+            "Project.Body.TLabel",
+            font=("Segoe UI", 10),
+            foreground="#333333"
+        )
+
+        style.configure(
+            "Project.Field.TLabel",
+            font=("Segoe UI", 10, "bold")
+        )
+
+        style.configure(
+            "Project.Value.TLabel",
+            font=("Segoe UI", 10)
+        )
+
+        style.configure(
+            "Project.Member.TLabel",
+            font=("Segoe UI", 10)
+        )
+
+        style.configure(
+            "Project.Close.TButton",
+            font=("Segoe UI", 10, "bold"),
+            padding=(12, 6)
+        )
+
         ttk.Label(
             container,
             text="Información del proyecto",
-            font=("Segoe UI", 18, "bold")
+            style="Project.Title.TLabel"
         ).pack(
             pady=(0, 5)
         )
@@ -1930,8 +3418,25 @@ class MainApplication:
         ttk.Label(
             container,
             text=self.project_info.theme,
-            font=("Segoe UI", 11)
+            style="Project.Subtitle.TLabel"
         ).pack(
+            pady=(0, 18)
+        )
+
+        ttk.Label(
+            container,
+            text=(
+                "Aplicación desarrollada en Python para construir grafos "
+                "dirigidos, acíclicos y ponderados. Permite ejecutar el "
+                "algoritmo de Dijkstra paso a paso, consultar las etiquetas "
+                "y el registro de decisiones, y visualizar los caminos "
+                "mínimos mediante una representación gráfica de red."
+            ),
+            style="Project.Body.TLabel",
+            wraplength=560,
+            justify="left"
+        ).pack(
+            fill="x",
             pady=(0, 18)
         )
 
@@ -1959,7 +3464,7 @@ class MainApplication:
             ttk.Label(
                 information_frame,
                 text=f"{label}:",
-                font=("Segoe UI", 9, "bold")
+                style="Project.Field.TLabel"
             ).grid(
                 row=index,
                 column=0,
@@ -1971,6 +3476,7 @@ class MainApplication:
             ttk.Label(
                 information_frame,
                 text=value,
+                style="Project.Value.TLabel",
                 wraplength=470
             ).grid(
                 row=index,
@@ -1998,19 +3504,17 @@ class MainApplication:
             ttk.Label(
                 integrants_frame,
                 text=f"{index}. {name}",
-                font=("Segoe UI", 10)
+                style="Project.Member.TLabel"
             ).pack(
                 anchor="w",
                 pady=3
             )
 
-        tk.Button(
+        ttk.Button(
             container,
             text="Cerrar",
             command=information_window.destroy,
-            width=12,
-            height=1,
-            font=("Segoe UI", 10, "bold")
+            style="Project.Close.TButton"
         ).pack(
             pady=(14, 0)
         )
@@ -2181,6 +3685,15 @@ class MainApplication:
                     "6. Siguiente paso",
                     "Ejecuta una iteración de Dijkstra."
                 ),
+                (
+                    "Herramientas de visualización",
+                    "Inicio restablece la vista; Anterior y Siguiente "
+                    "permiten recuperar vistas previas; Mover desplaza "
+                    "el gráfico; Zoom amplía una región seleccionada "
+                    "con el ratón; Guardar permite exportar el gráfico "
+                    "como PNG, PDF o SVG. También puede usar "
+                    "Vista > Restablecer vista del grafo."
+                ),
             ]
         )
 
@@ -2205,14 +3718,16 @@ class MainApplication:
                 ),
                 (
                     "Comparación",
-                    "Si la nueva distancia es menor, "
-                    "se reemplaza la etiqueta anterior."
+                    "Si la nueva distancia es menor, se actualiza "
+                    "la etiqueta. Si es igual, se registra otro "
+                    "predecesor óptimo; si es mayor, se conserva "
+                    "la etiqueta anterior."
                 ),
                 (
                     "Finalización",
-                    "El proceso termina cuando el destino "
-                    "es procesado o ya no existen vértices "
-                    "alcanzables sin procesar."
+                    "El proceso termina cuando todos los vértices "
+                    "han sido revisados. Los que conservan distancia "
+                    "infinita son inalcanzables desde el origen."
                 ),
             ]
         )
@@ -2223,8 +3738,9 @@ class MainApplication:
             [
                 (
                     "[L, X]_k",
-                    "L representa la distancia acumulada, "
-                    "X el predecesor y k la iteración."
+                    "L representa la distancia acumulada, X es el "
+                    "predecesor de la etiqueta mostrada y k es la "
+                    "iteración en la que se generó."
                 ),
                 (
                     "[0, -]_0",
@@ -2232,14 +3748,30 @@ class MainApplication:
                 ),
                 (
                     "[∞, -]_0",
-                    "Nodo cuya distancia todavía "
-                    "no ha sido determinada."
+                    "Nodo cuya distancia todavía no ha sido determinada."
+                ),
+                (
+                    "Predecesores alternativos",
+                    "Cuando dos rutas alcanzan un vértice con la misma "
+                    "distancia mínima, el sistema conserva los "
+                    "predecesores que permiten reconstruir ambas rutas."
+                ),
+                (
+                    "Caminos mínimos",
+                    "Al finalizar, se muestra la distancia mínima, "
+                    "la cantidad de caminos óptimos y la secuencia "
+                    "de vértices de cada uno."
                 ),
                 (
                     "Etiqueta tachada",
-                    "Representa una etiqueta anterior "
-                    "que fue reemplazada por otra "
-                    "con menor acumulado."
+                    "Representa una etiqueta que fue reemplazada "
+                    "por otra de menor distancia."
+                ),
+                (
+                    "Registro de decisiones",
+                    "Muestra las distancias candidatas, las "
+                    "comparaciones y las decisiones tomadas en "
+                    "cada iteración."
                 ),
             ]
         )
@@ -2301,7 +3833,6 @@ class ApplicationLauncher:
         application = MainApplication(
             root
         )
-
         application.run()
 
 if __name__ == "__main__":
