@@ -13,10 +13,12 @@ class ProjectInfo:
         self.group = "3"
         self.description = (
             "Aplicación desarrollada en Python para construir grafos "
-            "dirigidos, acíclicos y ponderados. Permite ejecutar el "
-            "algoritmo de Dijkstra paso a paso, consultar las etiquetas "
-            "y el registro de decisiones, y visualizar los caminos "
-            "mínimos mediante una representación gráfica de red."
+            "dirigidos y ponderados con pesos positivos, soportando "
+            "conexiones unidireccionales, bidireccionales y ciclos "
+            "dirigidos. Permite ejecutar el algoritmo de Dijkstra paso "
+            "a paso, consultar las etiquetas y el registro de decisiones, "
+            "y visualizar los caminos mínimos mediante una representación "
+            "gráfica de red."
         )
 
         self.integrants: List[str] = [

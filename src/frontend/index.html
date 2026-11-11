@@ -245,7 +245,12 @@
                 <!-- 2. CUADRO DE ETIQUETAS Y DECISIONES DE DIJKSTRA -->
                 <section id="dijkstra-card" class="card dijkstra-card">
                     <div class="panel-header-row">
-                        <span class="card-section-title">Etiquetas y decisiones de Dijkstra</span>
+                        <div class="panel-header-titles">
+                            <span class="card-section-title">Etiquetas y decisiones de Dijkstra</span>
+                            <span class="panel-notation-subtitle">
+                                L = distancia acumulada &nbsp;|&nbsp; X = predecesor &nbsp;|&nbsp; k = iteración
+                            </span>
+                        </div>
                         <button
                             id="btn-edit-manual-panel"
                             class="btn btn-xs btn-accent-outline hidden"
@@ -431,11 +436,11 @@
                     </div>
                     <div class="guide-item">
                         <h4>3. Crear o modificar grafo manual</h4>
-                        <p>En modo manual puede hacer clic directamente sobre dos nodos en el lienzo o usar el cuadro superior para agregar conexiones, editar pesos y alternar bidireccionalidad. Una vez confirmado, puede usar el botón <strong>Modificar grafo</strong> para editarlo (reiniciando Dijkstra automáticamente).</p>
+                        <p>En modo manual puede hacer clic directamente sobre dos nodos en el lienzo o usar el cuadro superior para agregar conexiones, editar pesos y alternar bidireccionalidad (se permiten nodos aislados o subgrafos desconectados tipo isla). Una vez confirmado, puede usar el botón <strong>Modificar grafo</strong> para editarlo (reiniciando Dijkstra automáticamente).</p>
                     </div>
                     <div class="guide-item">
                         <h4>4. Origen, Destino y Ejecución</h4>
-                        <p>Seleccione los vértices de origen y destino, presione <strong>Inicializar</strong> y avance con <strong>Siguiente paso</strong> o <strong>Ejecutar todo</strong>.</p>
+                        <p>Seleccione los vértices de origen y destino, presione <strong>Inicializar</strong> y avance con <strong>Siguiente paso</strong> o <strong>Ejecutar todo</strong>. Si cambia el Origen o el Destino después de una ejecución previa, Dijkstra se reinicializará automáticamente.</p>
                     </div>
                     <div class="guide-item">
                         <h4>5. Herramientas de visualización</h4>
@@ -451,7 +456,7 @@
                     </div>
                     <div class="guide-item">
                         <h4>Selección</h4>
-                        <p>En cada iteración se selecciona el vértice no procesado con la menor distancia acumulada.</p>
+                        <p>En cada iteración se selecciona el vértice no procesado con la menor distancia acumulada finita.</p>
                     </div>
                     <div class="guide-item">
                         <h4>Relajación y Comparación</h4>
@@ -459,7 +464,7 @@
                     </div>
                     <div class="guide-item">
                         <h4>Finalización</h4>
-                        <p>El proceso termina cuando todos los vértices han sido revisados, mostrando en la esquina superior derecha el cuadro resaltado con todos los caminos mínimos hallados.</p>
+                        <p>El proceso termina cuando todos los vértices alcanzables desde el origen han sido procesados (los vértices con distancia <code>∞</code> quedan identificados como inalcanzables), mostrando en la esquina superior derecha el cuadro resaltado con todos los caminos mínimos hallados.</p>
                     </div>
                 </div>
 

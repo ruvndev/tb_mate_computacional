@@ -34,7 +34,38 @@ class GraphRenderer {
         this.dragStartSvg = { x: 0, y: 0 };
         this.dragStartBox = null;
 
+        this.lastPayload = null;
+        this._lastScaleFactor = 1.0;
+
         this._bindViewportEvents();
+    }
+
+    /**
+     * Calcula el factor de compensación de tamaño para que, al achicar la ventana,
+     * los nodos y textos mantengan su tamaño visual o solo se reduzcan levemente
+     * sin desacomodar sus posiciones en el grafo.
+     */
+    _getResponsiveScaleFactor() {
+        if (!this.viewport) {
+            return 1.0;
+        }
+        const rect = this.viewport.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) {
+            return 1.0;
+        }
+        const viewportScale = Math.min(
+            rect.width / this.defaultBox.w,
+            rect.height / this.defaultBox.h
+        );
+        const refScale = 0.55;
+        if (viewportScale >= refScale) {
+            return 1.0;
+        }
+        const rawBoost = Math.pow(
+            refScale / Math.max(0.18, viewportScale),
+            0.72
+        );
+        return Math.min(1.52, Math.max(1.0, rawBoost));
     }
 
     /**
@@ -235,14 +266,33 @@ class GraphRenderer {
                 }
             }
         });
+
+        const handleViewportResize = () => {
+            if (!this.lastPayload) {
+                return;
+            }
+            const newFactor = this._getResponsiveScaleFactor();
+            if (Math.abs(newFactor - this._lastScaleFactor) > 0.012) {
+                this.render(this.lastPayload);
+            }
+        };
+
+        if (typeof ResizeObserver !== "undefined" && this.viewport) {
+            this._resizeObserver = new ResizeObserver(handleViewportResize);
+            this._resizeObserver.observe(this.viewport);
+        } else {
+            window.addEventListener("resize", handleViewportResize);
+        }
     }
 
     /**
      * Recorta los extremos de una curva cuadrática Bezier para que comience y termine
      * exactamente en el borde exterior de los nodos origen y destino.
      */
-    _computeTrimmedBezierPath(edge) {
+    _computeTrimmedBezierPath(edge, scaleFactor = 1.0) {
         const { x1, y1, cx, cy, x2, y2, r_u, r_v } = edge;
+        const scaledRu = r_u * scaleFactor;
+        const scaledRv = r_v * scaleFactor;
 
         // Dirección de salida desde (x1, y1) hacia el punto de control (cx, cy)
         let dxStart = cx - x1;
@@ -264,8 +314,8 @@ class GraphRenderer {
             lenEnd = Math.max(1e-3, Math.hypot(dxEnd, dyEnd));
         }
 
-        const startPad = r_u + 2;
-        const endPad = r_v + 6;
+        const startPad = scaledRu + 2;
+        const endPad = scaledRv + 6;
 
         const sx = x1 + (dxStart / lenStart) * startPad;
         const sy = y1 + (dyStart / lenStart) * startPad;
@@ -282,6 +332,12 @@ class GraphRenderer {
         if (!graphPayload) {
             return;
         }
+        this.lastPayload = graphPayload;
+
+        const scaleFactor = this._getResponsiveScaleFactor();
+        this._lastScaleFactor = scaleFactor;
+        const pillScale = 1 + (scaleFactor - 1) * 0.65;
+        const strokeScale = Math.pow(scaleFactor, 0.45);
 
         if (this.titleEl && graphPayload.title) {
             this.titleEl.textContent = graphPayload.title;
@@ -299,10 +355,16 @@ class GraphRenderer {
 
         for (const edge of sortedEdges) {
             const pathEl = document.createElementNS(svgNS, "path");
-            pathEl.setAttribute("d", this._computeTrimmedBezierPath(edge));
+            pathEl.setAttribute(
+                "d",
+                this._computeTrimmedBezierPath(edge, scaleFactor)
+            );
             pathEl.setAttribute("fill", "none");
             pathEl.setAttribute("stroke", edge.color);
-            pathEl.setAttribute("stroke-width", edge.width);
+            pathEl.setAttribute(
+                "stroke-width",
+                (edge.width * strokeScale).toFixed(2)
+            );
             pathEl.setAttribute("stroke-linecap", "round");
 
             if (edge.dashed) {
@@ -325,20 +387,20 @@ class GraphRenderer {
         for (const lbl of graphPayload.weight_labels || []) {
             const group = document.createElementNS(svgNS, "g");
             const textStr = String(lbl.text);
-            const boxW = Math.max(34, textStr.length * 10.5 + 18);
-            const boxH = 26;
+            const boxW = Math.max(34, textStr.length * 10.5 + 18) * pillScale;
+            const boxH = 26 * pillScale;
 
             const rect = document.createElementNS(svgNS, "rect");
             rect.setAttribute("x", (lbl.x - boxW / 2).toFixed(2));
             rect.setAttribute("y", (lbl.y - boxH / 2).toFixed(2));
-            rect.setAttribute("width", boxW);
-            rect.setAttribute("height", boxH);
-            rect.setAttribute("rx", 6);
-            rect.setAttribute("ry", 6);
+            rect.setAttribute("width", boxW.toFixed(2));
+            rect.setAttribute("height", boxH.toFixed(2));
+            rect.setAttribute("rx", (6 * pillScale).toFixed(2));
+            rect.setAttribute("ry", (6 * pillScale).toFixed(2));
             rect.setAttribute("fill", "#161b22");
             rect.setAttribute("fill-opacity", "0.96");
             rect.setAttribute("stroke", lbl.border_color || "#30363d");
-            rect.setAttribute("stroke-width", "1.2");
+            rect.setAttribute("stroke-width", (1.2 * strokeScale).toFixed(2));
 
             const text = document.createElementNS(svgNS, "text");
             text.setAttribute("x", lbl.x.toFixed(2));
@@ -347,7 +409,7 @@ class GraphRenderer {
             text.setAttribute("dominant-baseline", "central");
             text.setAttribute("fill", "#e6edf3");
             text.setAttribute("font-family", "Segoe UI, sans-serif");
-            text.setAttribute("font-size", "14.5px");
+            text.setAttribute("font-size", `${(14.5 * pillScale).toFixed(1)}px`);
             text.setAttribute("font-weight", "600");
             text.textContent = textStr;
 
@@ -362,13 +424,19 @@ class GraphRenderer {
             group.setAttribute("class", "svg-node-group");
             group.dataset.nodeId = node.id;
 
+            const scaledRadius = (node.r * scaleFactor).toFixed(2);
+            const scaledFont = (node.font_size * scaleFactor).toFixed(1);
+
             const circle = document.createElementNS(svgNS, "circle");
             circle.setAttribute("cx", node.x.toFixed(2));
             circle.setAttribute("cy", node.y.toFixed(2));
-            circle.setAttribute("r", node.r);
+            circle.setAttribute("r", scaledRadius);
             circle.setAttribute("fill", node.fill);
             circle.setAttribute("stroke", node.stroke);
-            circle.setAttribute("stroke-width", node.stroke_width);
+            circle.setAttribute(
+                "stroke-width",
+                (node.stroke_width * strokeScale).toFixed(2)
+            );
 
             const label = document.createElementNS(svgNS, "text");
             label.setAttribute("x", node.x.toFixed(2));
@@ -377,7 +445,7 @@ class GraphRenderer {
             label.setAttribute("dominant-baseline", "central");
             label.setAttribute("fill", "#e6edf3");
             label.setAttribute("font-family", "Segoe UI, sans-serif");
-            label.setAttribute("font-size", `${node.font_size}px`);
+            label.setAttribute("font-size", `${scaledFont}px`);
             label.setAttribute("font-weight", "700");
             label.style.pointerEvents = "none";
             label.textContent = node.id;

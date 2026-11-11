@@ -30,16 +30,16 @@ class LayoutEngine:
         usable_h = height - 2 * y_margin
 
         preset_zones: Dict[int, List[int]] = {
-            7: [1, 2, 2, 2],
-            8: [1, 2, 3, 2],
-            9: [1, 3, 3, 2],
+            7: [1, 2, 3, 1],
+            8: [1, 2, 2, 2, 1],
+            9: [1, 2, 3, 2, 1],
             10: [1, 3, 3, 2, 1],
             11: [1, 3, 3, 3, 1],
-            12: [1, 3, 3, 3, 2],
-            13: [2, 3, 3, 3, 2],
+            12: [1, 2, 3, 3, 2, 1],
+            13: [1, 3, 3, 3, 2, 1],
             14: [1, 3, 3, 3, 3, 1],
-            15: [2, 3, 3, 3, 3, 1],
-            16: [2, 3, 3, 3, 3, 2],
+            15: [1, 2, 3, 3, 3, 2, 1],
+            16: [1, 2, 3, 3, 3, 3, 1],
         }
 
         if node_count in preset_zones:
@@ -59,17 +59,15 @@ class LayoutEngine:
             base_x = x_margin + (z_idx / max(1, num_zones - 1)) * usable_w
             zone_pts: List[Tuple[float, float]] = []
 
-            if k == 1:
+            if z_idx in (0, num_zones - 1) and k == 1:
+                zone_pts.append((base_x, height / 2.0))
+            elif k == 1:
                 y_frac = (
                     0.48
                     + (0.08 if z_idx % 2 == 0 else -0.08)
                     + rng.uniform(-0.08, 0.08)
                 )
-                x_jit = (
-                    0.0
-                    if z_idx in (0, num_zones - 1)
-                    else rng.uniform(-0.22, 0.22)
-                )
+                x_jit = rng.uniform(-0.22, 0.22)
                 zone_pts.append((base_x + x_jit, y_margin + y_frac * usable_h))
             else:
                 band_shift = 0.065 if (z_idx % 2 == 1) else -0.065
@@ -134,8 +132,9 @@ class LayoutEngine:
         d3 = ccw(p3, p4, p1)
         d4 = ccw(p3, p4, p2)
 
-        return ((d1 > 0 and d2 < 0) or (d1 < 0 and d2 > 0)) and (
-            (d3 > 0 and d4 < 0) or (d3 < 0 and d4 > 0)
+        return (
+            (d2 < 0 < d1 or d1 < 0 < d2)
+            and (d4 < 0 < d3 or d3 < 0 < d4)
         )
 
     @staticmethod
@@ -186,6 +185,13 @@ class LayoutEngine:
         except nx.NetworkXUnfeasible:
             topo_nodes = list(nodes)
 
+        first_node = nodes[0]
+        last_node = nodes[-1]
+        middle_topo = [
+            n for n in topo_nodes if n not in (first_node, last_node)
+        ]
+        topo_nodes = [first_node] + middle_topo + [last_node]
+
         zones_coords = cls.build_base_2d_slots(node_count, rng)
         zones_nodes: List[List[str]] = []
         cursor = 0
@@ -201,6 +207,54 @@ class LayoutEngine:
                 positions[u] = [zone_pts[i][0], zone_pts[i][1]]
 
         edges = list(graph.edges)
+        if not edges and len(zones_nodes) > 2:
+            for z_idx in range(1, len(zones_nodes) - 1):
+                rng.shuffle(zones_nodes[z_idx])
+            for z_idx in range(1, len(zones_nodes) - 2):
+                if (
+                    zones_nodes[z_idx]
+                    and zones_nodes[z_idx + 1]
+                    and rng.random() < 0.5
+                ):
+                    i_a = rng.randrange(len(zones_nodes[z_idx]))
+                    i_b = rng.randrange(len(zones_nodes[z_idx + 1]))
+                    (
+                        zones_nodes[z_idx][i_a],
+                        zones_nodes[z_idx + 1][i_b],
+                    ) = (
+                        zones_nodes[z_idx + 1][i_b],
+                        zones_nodes[z_idx][i_a],
+                    )
+            for z_idx, zone_pts in enumerate(zones_coords):
+                if 0 < z_idx < len(zones_coords) - 1:
+                    shifted_pts: List[Tuple[float, float]] = []
+                    for px, py in zone_pts:
+                        nx_p = max(
+                            2.1,
+                            min(13.9, px + rng.uniform(-0.55, 0.55)),
+                        )
+                        ny_p = max(
+                            1.1,
+                            min(8.9, py + rng.uniform(-0.75, 0.75)),
+                        )
+                        shifted_pts.append((nx_p, ny_p))
+                    rng.shuffle(shifted_pts)
+                    zones_coords[z_idx] = shifted_pts
+                for i, u in enumerate(zones_nodes[z_idx]):
+                    positions[u] = [
+                        zones_coords[z_idx][i][0],
+                        zones_coords[z_idx][i][1],
+                    ]
+            for z_idx in range(len(zones_nodes) - 1):
+                curr_z = zones_nodes[z_idx]
+                next_z = zones_nodes[z_idx + 1]
+                for u in curr_z:
+                    v = rng.choice(next_z)
+                    edges.append((u, v))
+                for v in next_z:
+                    if not any(dst == v for _, dst in edges):
+                        u = rng.choice(curr_z)
+                        edges.append((u, v))
 
         for _sweep in range(4):
             for z_idx in range(len(zones_coords)):
@@ -259,6 +313,8 @@ class LayoutEngine:
         height = 10.0
         x_margin = 1.2
         y_margin = 1.0
+        positions[first_node] = [x_margin, height / 2.0]
+        positions[last_node] = [width - x_margin, height / 2.0]
         min_node_dist = 2.65 if node_count <= 12 else 2.30
         ideal_edge_len = 3.6
 
@@ -338,6 +394,8 @@ class LayoutEngine:
                             forces[v][1] -= ody * push * 0.2
 
             for u in nodes:
+                if u in (first_node, last_node):
+                    continue
                 fx, fy = forces[u]
                 mag = math.hypot(fx, fy)
                 if mag > 1.0:
@@ -363,6 +421,9 @@ class LayoutEngine:
             ny_coord = ((py - min_y) / span_y) * 8.4 + 0.8
             final_positions[u] = (float(nx_coord), float(ny_coord))
 
+        final_positions[first_node] = (1.0, 5.0)
+        final_positions[last_node] = (15.0, 5.0)
+
         return final_positions
 
     @staticmethod
@@ -381,21 +442,21 @@ class LayoutEngine:
         edges = list(graph.edges)
 
         def bezier_point(
-            x1: float,
-            y1: float,
-            x2: float,
-            y2: float,
-            rad: float,
-            t: float,
+            bx1: float,
+            by1: float,
+            bx2: float,
+            by2: float,
+            b_rad: float,
+            b_t: float,
         ) -> Tuple[float, float]:
-            dx = x2 - x1
-            dy = y2 - y1
-            cx = (x1 + x2) / 2.0 + rad * dy
-            cy = (y1 + y2) / 2.0 - rad * dx
-            rem = 1.0 - t
-            bx = rem * rem * x1 + 2.0 * rem * t * cx + t * t * x2
-            by = rem * rem * y1 + 2.0 * rem * t * cy + t * t * y2
-            return bx, by
+            dx = bx2 - bx1
+            dy = by2 - by1
+            cx = (bx1 + bx2) / 2.0 + b_rad * dy
+            cy = (by1 + by2) / 2.0 - b_rad * dx
+            rem = 1.0 - b_t
+            out_x = rem * rem * bx1 + 2.0 * rem * b_t * cx + b_t * b_t * bx2
+            out_y = rem * rem * by1 + 2.0 * rem * b_t * cy + b_t * b_t * by2
+            return out_x, out_y
 
         edge_curvatures: Dict[Tuple[str, str], float] = {}
         placed_midpoints: List[Tuple[float, float]] = []

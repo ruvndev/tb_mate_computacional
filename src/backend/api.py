@@ -1,8 +1,8 @@
 """API puente entre el núcleo en Python y la interfaz web de escritorio (pywebview)."""
 
 import base64
+import threading
 from typing import Any, Dict, List, Optional, Set, Tuple
-import networkx as nx
 import webview
 
 from backend.project_info import ProjectInfo
@@ -22,6 +22,10 @@ class DesktopAPI:
         self.dijkstra = DijkstraEngine()
 
         self.cached_positions: Dict[str, Tuple[float, float]] = {}
+        self._cached_layout_signature: Optional[Tuple[Any, ...]] = None
+        self._state_lock = threading.RLock()
+        self._confirming_manual: bool = False
+        self._manual_epoch: int = 0
         self.manual_build_mode: bool = False
         self.is_manual_graph: bool = False
         self.manual_connections: List[Dict[str, Any]] = []
@@ -33,6 +37,11 @@ class DesktopAPI:
         )
         self.dijkstra.set_graph(graph, seed)
         self.cached_positions = LayoutEngine.calculate_positions(graph, seed)
+        self._cached_layout_signature = (
+            tuple(graph.nodes),
+            seed,
+            tuple(sorted(graph.edges)),
+        )
 
     def _build_graph_payload(self) -> Dict[str, Any]:
         """
@@ -45,10 +54,21 @@ class DesktopAPI:
         node_count = len(nodes)
         edge_count = graph.number_of_edges()
 
-        if not self.cached_positions or set(self.cached_positions.keys()) != set(nodes):
+        is_manual = self.manual_build_mode or self.is_manual_graph
+        layout_signature = (
+            tuple(nodes),
+            self.dijkstra.layout_seed,
+            () if is_manual else tuple(sorted(graph.edges)),
+        )
+
+        if (
+            not self.cached_positions
+            or self._cached_layout_signature != layout_signature
+        ):
             self.cached_positions = LayoutEngine.calculate_positions(
                 graph, self.dijkstra.layout_seed
             )
+            self._cached_layout_signature = layout_signature
 
         positions = self.cached_positions
         edge_curvatures, label_coords = (
@@ -73,15 +93,15 @@ class DesktopAPI:
                     optimal_edges.add((path[idx], path[idx + 1]))
 
         if node_count <= 10:
-            base_r, key_r, curr_r, font_sz = 30.0, 32.5, 34.5, 15
+            base_r, key_r, curr_r, font_sz = 34.5, 37.5, 40.0, 16.5
         elif node_count <= 13:
-            base_r, key_r, curr_r, font_sz = 27.5, 30.0, 32.0, 14
+            base_r, key_r, curr_r, font_sz = 31.5, 34.5, 37.0, 15.5
         else:
-            base_r, key_r, curr_r, font_sz = 25.5, 28.0, 30.0, 13
+            base_r, key_r, curr_r, font_sz = 29.0, 32.0, 34.5, 14.5
 
         # Transformar coordenadas de [0..16]x[0..10] (Y hacia arriba) a SVG [0..1600]x[0..1000] (Y hacia abajo)
-        def to_svg(px: float, py: float) -> Tuple[float, float]:
-            return round(px * 100.0, 2), round((10.0 - py) * 100.0, 2)
+        def to_svg(coord_x: float, coord_y: float) -> Tuple[float, float]:
+            return round(coord_x * 100.0, 2), round((10.0 - coord_y) * 100.0, 2)
 
         nodes_payload: List[Dict[str, Any]] = []
         node_radii: Dict[str, float] = {}
@@ -125,15 +145,27 @@ class DesktopAPI:
 
             if (
                 current_node is not None
+                and not algorithm_finished
                 and node == current_node
-                and node != source
-                and node != target
             ):
-                fill_color = "#272115"
-                stroke_color = "#e3b341"
-                stroke_width = 2.6
-                radius = curr_r
-                role = "current"
+                if node == source:
+                    fill_color = "#122117"
+                    stroke_color = "#e3b341"
+                    stroke_width = 2.8
+                    radius = curr_r
+                    role = "current_source"
+                elif node == target:
+                    fill_color = "#2a1912"
+                    stroke_color = "#e3b341"
+                    stroke_width = 2.8
+                    radius = curr_r
+                    role = "current_target"
+                else:
+                    fill_color = "#272115"
+                    stroke_color = "#e3b341"
+                    stroke_width = 2.6
+                    radius = curr_r
+                    role = "current"
 
             node_radii[node] = radius
 
@@ -303,6 +335,7 @@ class DesktopAPI:
                 error="Ingrese un número entero entre 7 y 16.",
             )
 
+        self._manual_epoch += 1
         self.manual_build_mode = False
         self.is_manual_graph = False
         self.manual_connections = []
@@ -315,6 +348,11 @@ class DesktopAPI:
         )
         self.dijkstra.set_graph(graph, seed)
         self.cached_positions = LayoutEngine.calculate_positions(graph, seed)
+        self._cached_layout_signature = (
+            tuple(graph.nodes),
+            seed,
+            tuple(sorted(graph.edges)),
+        )
 
         modes_desc: List[str] = []
         if allow_bidirectional:
@@ -339,6 +377,7 @@ class DesktopAPI:
                 error="Ingrese un número entero entre 7 y 16.",
             )
 
+        self._manual_epoch += 1
         self.manual_build_mode = True
         self.is_manual_graph = False
         self.manual_connections = []
@@ -347,6 +386,11 @@ class DesktopAPI:
         graph, seed = GraphGenerator.create_empty_graph(count)
         self.dijkstra.set_graph(graph, seed)
         self.cached_positions = LayoutEngine.calculate_positions(graph, seed)
+        self._cached_layout_signature = (
+            tuple(graph.nodes),
+            seed,
+            (),
+        )
 
         return self._build_full_response(
             f"Modo construcción manual ({count} nodos): haga clic en el primer nodo para crear una conexión."
@@ -364,6 +408,8 @@ class DesktopAPI:
                 error="Solo se puede modificar un grafo manual previamente confirmado.",
             )
 
+        self._manual_epoch += 1
+        self.dijkstra.graph = self.dijkstra.graph.copy()
         self.dijkstra.reset_algorithm_data()
         self.manual_build_mode = True
         self.manual_highlighted_nodes = []
@@ -405,12 +451,22 @@ class DesktopAPI:
         Actualiza en tiempo real las aristas y pesos del grafo durante la construcción
         manual sin recalcular las posiciones de los nodos.
         """
-        self.manual_connections = connections
-        self.manual_highlighted_nodes = highlighted_nodes
+        if not self.manual_build_mode or self._confirming_manual:
+            return {"ok": False, "ignored": True}
 
+        preview_epoch = self._manual_epoch
+        target_graph = self.dijkstra.graph
         nodes = self.dijkstra.get_nodes()
-        self.dijkstra.graph.clear_edges()
 
+        if (
+            not self.manual_build_mode
+            or self._confirming_manual
+            or self._manual_epoch != preview_epoch
+            or self.dijkstra.graph is not target_graph
+        ):
+            return {"ok": False, "ignored": True}
+
+        preview_edges: List[Tuple[str, str, int]] = []
         for conn in connections:
             u = str(conn.get("u", ""))
             v = str(conn.get("v", ""))
@@ -425,98 +481,134 @@ class DesktopAPI:
                 w = 0
 
             is_bi = bool(conn.get("bidirectional", False))
-            self.dijkstra.graph.add_edge(u, v, weight=w)
+            preview_edges.append((u, v, w))
             if is_bi:
-                self.dijkstra.graph.add_edge(v, u, weight=w)
+                preview_edges.append((v, u, w))
+
+        next_preview_graph = target_graph.copy()
+        next_preview_graph.clear_edges()
+        for u, v, w in preview_edges:
+            if (
+                not self.manual_build_mode
+                or self._confirming_manual
+                or self._manual_epoch != preview_epoch
+                or self.dijkstra.graph is not target_graph
+            ):
+                return {"ok": False, "ignored": True}
+            next_preview_graph.add_edge(u, v, weight=w)
+
+        with self._state_lock:
+            if (
+                not self.manual_build_mode
+                or self._confirming_manual
+                or self._manual_epoch != preview_epoch
+                or self.dijkstra.graph is not target_graph
+            ):
+                return {"ok": False, "ignored": True}
+            self.manual_connections = connections
+            self.manual_highlighted_nodes = highlighted_nodes
+            self.dijkstra.graph = next_preview_graph
+
+        payload = self._build_graph_payload()
+
+        if (
+            not self.manual_build_mode
+            or self._confirming_manual
+            or self._manual_epoch != preview_epoch
+            or self.dijkstra.graph is not next_preview_graph
+        ):
+            return {"ok": False, "ignored": True}
 
         return {
             "ok": True,
-            "graph": self._build_graph_payload(),
+            "graph": payload,
         }
 
     def confirm_manual_graph(
         self, connections: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """
-        Valida que todas las conexiones manuales tengan peso entero positivo y que
-        ningún nodo haya quedado aislado, confirmando el grafo para ejecutar Dijkstra.
+        Valida que todas las conexiones manuales tengan peso entero positivo,
+        permitiendo nodos aislados o componentes desconectados (islas), y confirma
+        el grafo para ejecutar Dijkstra.
         """
-        if not connections:
-            return self._build_full_response(
-                "Sin conexiones.",
-                ok=False,
-                error="Debe agregar al menos una conexión haciendo clic en los nodos.",
-            )
-
-        edges: List[Tuple[str, str, int]] = []
-        connected_nodes: Set[str] = set()
-
-        for conn in connections:
-            u = str(conn.get("u", "")).strip()
-            v = str(conn.get("v", "")).strip()
-            raw_w = str(conn.get("weight", "")).strip()
-            is_bi = bool(conn.get("bidirectional", False))
-
-            if not raw_w:
-                return self._build_full_response(
-                    "Peso faltante.",
-                    ok=False,
-                    error=f"Debe asignar un peso a la conexión {u} → {v}.",
-                )
-
-            try:
-                weight = int(raw_w)
-                if weight <= 0:
-                    raise ValueError
-            except ValueError:
-                return self._build_full_response(
-                    "Peso inválido.",
-                    ok=False,
-                    error=f"El peso de la conexión {u} → {v} debe ser un entero positivo mayor que 0.",
-                )
-
-            edges.append((u, v, weight))
-            if is_bi:
-                edges.append((v, u, weight))
-            connected_nodes.add(u)
-            connected_nodes.add(v)
-
-        all_nodes = set(self.dijkstra.get_nodes())
-        isolated_nodes = sorted(
-            list(all_nodes - connected_nodes),
-            key=lambda x: int(x[1:]) if x[1:].isdigit() else 999,
-        )
-        if isolated_nodes:
-            return self._build_full_response(
-                "Nodos sin conectar.",
-                ok=False,
-                error=(
-                    "No pueden quedar nodos aislados sin conectar.\n"
-                    f"Nodos sin conexión: {', '.join(isolated_nodes)}"
-                ),
-            )
-
-        node_count = len(all_nodes)
+        with self._state_lock:
+            self._manual_epoch += 1
+            self._confirming_manual = True
         try:
-            graph, seed = GraphGenerator.create_manual_graph(
-                node_count, edges, preserve_seed=self.dijkstra.layout_seed
-            )
-        except ValueError as err:
+            if not connections:
+                return self._build_full_response(
+                    "Sin conexiones.",
+                    ok=False,
+                    error="Debe agregar al menos una conexión haciendo clic en los nodos.",
+                )
+
+            edges: List[Tuple[str, str, int]] = []
+
+            for conn in connections:
+                u = str(conn.get("u", "")).strip()
+                v = str(conn.get("v", "")).strip()
+                raw_w = str(conn.get("weight", "")).strip()
+                is_bi = bool(conn.get("bidirectional", False))
+
+                if not raw_w:
+                    return self._build_full_response(
+                        "Peso faltante.",
+                        ok=False,
+                        error=f"Debe asignar un peso a la conexión {u} → {v}.",
+                    )
+
+                try:
+                    weight = int(raw_w)
+                    if weight <= 0:
+                        raise ValueError
+                except ValueError:
+                    return self._build_full_response(
+                        "Peso inválido.",
+                        ok=False,
+                        error=f"El peso de la conexión {u} → {v} debe ser un entero positivo mayor que 0.",
+                    )
+
+                edges.append((u, v, weight))
+                if is_bi:
+                    edges.append((v, u, weight))
+
+            node_count = len(self.dijkstra.get_nodes())
+            try:
+                graph, seed = GraphGenerator.create_manual_graph(
+                    node_count,
+                    edges,
+                    preserve_seed=self.dijkstra.layout_seed,
+                )
+            except ValueError as err:
+                return self._build_full_response(
+                    "Error en el grafo manual.", ok=False, error=str(err)
+                )
+
+            with self._state_lock:
+                self._manual_epoch += 1
+                self.manual_build_mode = False
+                self.is_manual_graph = True
+                self.manual_connections = connections
+                self.manual_highlighted_nodes = []
+
+                self.dijkstra.set_graph(graph, seed)
+                if not self.cached_positions:
+                    self.cached_positions = LayoutEngine.calculate_positions(
+                        graph, seed
+                    )
+                self._cached_layout_signature = (
+                    tuple(graph.nodes),
+                    seed,
+                    (),
+                )
+
             return self._build_full_response(
-                "Error en el grafo manual.", ok=False, error=str(err)
+                f"Grafo manual de {node_count} vértices confirmado correctamente. Seleccione origen y destino."
             )
-
-        self.manual_build_mode = False
-        self.is_manual_graph = True
-        self.manual_connections = connections
-        self.manual_highlighted_nodes = []
-
-        self.dijkstra.set_graph(graph, seed)
-        self.cached_positions = LayoutEngine.calculate_positions(graph, seed)
-
-        return self._build_full_response(
-            f"Grafo manual de {node_count} vértices confirmado correctamente. Seleccione origen y destino."
-        )
+        finally:
+            with self._state_lock:
+                self._confirming_manual = False
 
     def initialize_dijkstra(self, source: str, target: str) -> Dict[str, Any]:
         """Inicializa el algoritmo de Dijkstra para el origen y destino seleccionados."""
@@ -543,6 +635,25 @@ class DesktopAPI:
 
         return self._build_full_response(
             f"Dijkstra inicializado. Origen: {source} | Destino: {target}."
+        )
+
+    def handle_endpoint_change(self, source: str, target: str) -> Dict[str, Any]:
+        """
+        Reinicializa automáticamente el motor de Dijkstra cuando el usuario modifica
+        los selectores de Origen o Destino tras una ejecución o inicialización previa.
+        """
+        if self.manual_build_mode or not self.dijkstra.labels:
+            return {"ok": True, "noop": True}
+
+        if source == target:
+            self.dijkstra.reset_algorithm_data()
+            return self._build_full_response(
+                "Se reinició Dijkstra al cambiar los extremos. El origen y el destino deben ser diferentes."
+            )
+
+        self.dijkstra.initialize_dijkstra(source, target)
+        return self._build_full_response(
+            f"Dijkstra reinicializado automáticamente. Nuevo origen: {source} | Nuevo destino: {target}."
         )
 
     def next_step_dijkstra(self) -> Dict[str, Any]:
@@ -589,7 +700,7 @@ class DesktopAPI:
         self, data_content: str, ext: str = "png"
     ) -> Dict[str, Any]:
         """Abre un cuadro de diálogo nativo para guardar el gráfico exportado en PNG o SVG."""
-        if not webview.windows:
+        if not webview.windows or self.project_info is None:
             return {"saved": False, "error": "No se encontró la ventana activa."}
 
         window = webview.windows[0]

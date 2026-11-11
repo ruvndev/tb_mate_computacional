@@ -2,7 +2,7 @@
 
 import math
 import random
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, cast
 import networkx as nx
 from backend.layout_engine import LayoutEngine
 
@@ -73,27 +73,27 @@ class GraphGenerator:
                 cursor += 1
 
         def can_add_clean_edge(
-            u: str,
-            v: str,
+            edge_u: str,
+            edge_v: str,
             allow_crossing: bool = False,
             require_forward_x: bool = True,
         ) -> bool:
-            if graph.has_edge(u, v):
+            if graph.has_edge(edge_u, edge_v):
                 return False
-            p1, p2 = pos[u], pos[v]
-            if require_forward_x and p2[0] < p1[0] - 0.35:
+            pt_a, pt_b = pos[edge_u], pos[edge_v]
+            if require_forward_x and pt_b[0] < pt_a[0] - 0.35:
                 return False
             for w in nodes:
-                if w == u or w == v:
+                if w == edge_u or w == edge_v:
                     continue
-                if LayoutEngine.point_to_segment_dist(pos[w], p1, p2) < 0.95:
+                if LayoutEngine.point_to_segment_dist(pos[w], pt_a, pt_b) < 0.95:
                     return False
             if not allow_crossing:
                 for eu, ev in graph.edges:
-                    if eu in (u, v) or ev in (u, v):
+                    if eu in (edge_u, edge_v) or ev in (edge_u, edge_v):
                         continue
                     if LayoutEngine.segments_intersect(
-                        p1, p2, pos[eu], pos[ev]
+                        pt_a, pt_b, pos[eu], pos[ev]
                     ):
                         return False
             return True
@@ -135,7 +135,7 @@ class GraphGenerator:
         # 2. Garantizar que cada nodo (excepto el último) tenga al menos una salida
         for i in range(node_count - 1):
             u = nodes[i]
-            if graph.out_degree(u) > 0:
+            if len(list(graph.successors(u))) > 0:
                 continue
             zu = node_zone[u]
             candidates = []
@@ -176,7 +176,7 @@ class GraphGenerator:
             if random.random() < 0.35 and i < node_count - 3:
                 target_out = min(3, target_out + 1)
 
-            if graph.out_degree(u) >= target_out:
+            if len(list(graph.successors(u))) >= target_out:
                 continue
 
             candidates = []
@@ -199,9 +199,9 @@ class GraphGenerator:
             candidates.sort(key=lambda item: item[0])
 
             for _, v in candidates:
-                if graph.out_degree(u) >= target_out:
+                if len(list(graph.successors(u))) >= target_out:
                     break
-                if graph.in_degree(v) >= 3 and v != nodes[-1]:
+                if len(list(graph.predecessors(v))) >= 3 and v != nodes[-1]:
                     continue
                 if can_add_clean_edge(u, v, allow_crossing=False):
                     graph.add_edge(u, v, weight=random.randint(10, 30))
@@ -238,10 +238,12 @@ class GraphGenerator:
                     break
                 if graph.has_edge(v, u):
                     continue
-                existing_weight = int(graph[u][v]["weight"])
+                existing_weight = int(cast(Any, graph[u][v]["weight"]))
                 if not allow_cycles:
                     graph.remove_edge(u, v)
-                    creates_cycle = nx.has_path(graph, u, v)
+                    creates_cycle = nx.has_path(graph, u, v) or nx.has_path(
+                        graph, v, u
+                    )
                     graph.add_edge(u, v, weight=existing_weight)
                     if creates_cycle:
                         continue
@@ -256,27 +258,35 @@ class GraphGenerator:
                         break
                     if graph.has_edge(v, u):
                         continue
-                    existing_weight = int(graph[u][v]["weight"])
+                    existing_weight = int(cast(Any, graph[u][v]["weight"]))
                     graph.remove_edge(u, v)
                     removed_chords: List[Tuple[str, str, int]] = []
-                    while nx.has_path(graph, u, v):
-                        alt_path = nx.shortest_path(graph, u, v)
+                    while nx.has_path(graph, u, v) or nx.has_path(graph, v, u):
+                        alt_path = (
+                            nx.shortest_path(graph, u, v)
+                            if nx.has_path(graph, u, v)
+                            else nx.shortest_path(graph, v, u)
+                        )
                         chord_removed = False
                         for idx in range(len(alt_path) - 1):
                             ca, cb = alt_path[idx], alt_path[idx + 1]
                             if (
                                 not graph.has_edge(cb, ca)
-                                and graph.out_degree(ca) > 1
-                                and graph.in_degree(cb) > 1
+                                and len(list(graph.successors(ca))) > 1
+                                and len(list(graph.predecessors(cb))) > 1
                             ):
-                                cw = int(graph[ca][cb]["weight"])
+                                cw = int(cast(Any, graph[ca][cb]["weight"]))
                                 graph.remove_edge(ca, cb)
-                                removed_chords.append((ca, cb, cw))
-                                chord_removed = True
-                                break
+                                if nx.has_path(graph, nodes[0], cb):
+                                    removed_chords.append((ca, cb, cw))
+                                    chord_removed = True
+                                    break
+                                graph.add_edge(ca, cb, weight=cw)
                         if not chord_removed:
                             break
-                    if not nx.has_path(graph, u, v):
+                    if not nx.has_path(graph, u, v) and not nx.has_path(
+                        graph, v, u
+                    ):
                         graph.add_edge(u, v, weight=existing_weight)
                         graph.add_edge(v, u, weight=existing_weight)
                         added_bidir += 1
@@ -295,12 +305,13 @@ class GraphGenerator:
                     if graph.has_edge(u, v) or graph.has_edge(v, u):
                         continue
                     zone_diff = node_zone[v] - node_zone[u]
-                    if 1 <= zone_diff <= 2 and nx.has_path(graph, u, v):
+                    if 1 <= zone_diff <= 3 and nx.has_path(graph, u, v):
                         dist = math.hypot(
                             pos[v][0] - pos[u][0], pos[v][1] - pos[u][1]
                         )
+                        zone_penalty = 0.0 if zone_diff <= 2 else 1.5
                         cycle_candidates.append(
-                            (dist + random.uniform(0, 0.8), v, u)
+                            (dist + zone_penalty + random.uniform(0, 0.8), v, u)
                         )
 
             cycle_candidates.sort(key=lambda item: item[0])
@@ -332,7 +343,58 @@ class GraphGenerator:
                         graph.add_edge(
                             src_back, dst_back, weight=random.randint(10, 30)
                         )
+                        added_cycles += 1
                         break
+
+            if added_cycles == 0:
+                fallback_candidates: List[Tuple[float, str, str]] = []
+                for i in range(node_count):
+                    for j in range(i + 1, node_count):
+                        u = nodes[i]
+                        v = nodes[j]
+                        if graph.has_edge(u, v) or graph.has_edge(v, u):
+                            continue
+                        if nx.has_path(graph, u, v):
+                            p1, p2 = pos[v], pos[u]
+                            min_clearance = min(
+                                (
+                                    LayoutEngine.point_to_segment_dist(
+                                        pos[w], p1, p2
+                                    )
+                                    for w in nodes
+                                    if w != u and w != v
+                                ),
+                                default=float("inf"),
+                            )
+                            dist = math.hypot(p1[0] - p2[0], p1[1] - p2[1])
+                            fallback_candidates.append(
+                                (-min_clearance + dist * 0.05, v, u)
+                            )
+                if fallback_candidates:
+                    fallback_candidates.sort(key=lambda item: item[0])
+                    _, best_src, best_dst = fallback_candidates[0]
+                    graph.add_edge(
+                        best_src,
+                        best_dst,
+                        weight=random.randint(10, 30),
+                    )
+                    added_cycles += 1
+                else:
+                    for u in nodes:
+                        for mid in graph.successors(u):
+                            for v in graph.successors(mid):
+                                if u != v and not graph.has_edge(v, u):
+                                    graph.add_edge(
+                                        v,
+                                        u,
+                                        weight=random.randint(10, 30),
+                                    )
+                                    added_cycles += 1
+                                    break
+                            if added_cycles > 0:
+                                break
+                        if added_cycles > 0:
+                            break
 
         return graph, layout_seed
 

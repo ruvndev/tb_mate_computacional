@@ -645,6 +645,17 @@ html, body {
     flex-shrink: 0;
 }
 
+.panel-header-titles {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.panel-notation-subtitle {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
 .tabs-bar {
     display: flex;
     gap: 4px;
@@ -728,6 +739,12 @@ html, body {
 .updated_now_block {
     background-color: #121d2f;
     color: #58a6ff;
+    font-weight: 700;
+}
+
+.tie_now_block {
+    background-color: #102326;
+    color: #39c5bb;
     font-weight: 700;
 }
 
@@ -877,6 +894,10 @@ html, body {
     background-color: #2a1912;
     color: var(--accent-orange);
     font-weight: 700;
+}
+
+.decision-line.default_line {
+    color: var(--text-primary);
 }
 
 /* ==========================================================================
@@ -1116,6 +1137,7 @@ html, body {
 .info-description-text {
     color: var(--text-secondary);
     line-height: 1.5;
+    text-align: justify;
 }
 
 .info-subcard {

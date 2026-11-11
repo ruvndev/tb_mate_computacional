@@ -144,6 +144,7 @@ class PanelsRenderer {
             <div class="panel-section-header">GUÍA DE COLORES\n===============</div>
             <div class="color-guide-item current_block">▶ Amarillo : Vértice actual en evaluación</div>
             <div class="color-guide-item updated_now_block">✦ Azul     : Etiqueta mejorada en este paso</div>
+            <div class="color-guide-item tie_now_block">≡ Turquesa : Empate en distancia mínima (nuevo predecesor)</div>
             <div class="color-guide-item source_block">● Verde    : Vértice de origen</div>
             <div class="color-guide-item processed_block">✓ Celeste  : Vértice ya procesado</div>
             <div class="color-guide-item reachable_pending_block">◆ Violeta  : Vértice alcanzado pendiente</div>

@@ -8,6 +8,7 @@ class DijkstraDesktopApp {
     constructor() {
         this.manualBuildMode = false;
         this.isManualGraph = false;
+        this._confirmingManual = false;
         this.manualConnections = [];
         this.manualFirstNode = null;
         this.manualHighlightedNodes = [];
@@ -88,7 +89,13 @@ class DijkstraDesktopApp {
             this.handleEditManualGraph();
         });
 
-        // Controles de ejecución de Dijkstra
+        // Controles de ejecución de Dijkstra y cambio automático de extremos
+        this.selectSource.addEventListener("change", () => {
+            this.handleEndpointSelectorChange();
+        });
+        this.selectTarget.addEventListener("change", () => {
+            this.handleEndpointSelectorChange();
+        });
         this.btnInitDijkstra.addEventListener("click", () => {
             this.handleInitializeDijkstra();
         });
@@ -164,6 +171,31 @@ class DijkstraDesktopApp {
                 const modalId = btn.dataset.closeModal;
                 document.getElementById(modalId).classList.add("hidden");
             });
+        });
+
+        // Cerrar modales informativos al hacer clic en el fondo oscuro o presionar Escape
+        ["modal-project-info", "modal-system-guide"].forEach((modalId) => {
+            const modalEl = document.getElementById(modalId);
+            if (modalEl) {
+                modalEl.addEventListener("mousedown", (e) => {
+                    if (e.target === modalEl) {
+                        modalEl.classList.add("hidden");
+                    }
+                });
+            }
+        });
+
+        window.addEventListener("keydown", (e) => {
+            if (e.key === "Escape") {
+                ["modal-project-info", "modal-system-guide"].forEach(
+                    (modalId) => {
+                        const modalEl = document.getElementById(modalId);
+                        if (modalEl && !modalEl.classList.contains("hidden")) {
+                            modalEl.classList.add("hidden");
+                        }
+                    }
+                );
+            }
         });
 
         // Exportación de imagen PNG / vector SVG
@@ -257,6 +289,9 @@ class DijkstraDesktopApp {
             nodes.length !== this.currentNodes.length ||
             nodes.some((n, i) => n !== this.currentNodes[i]);
         this.currentNodes = nodes;
+        if (nodes.length > 0 && this.inputNodeCount) {
+            this.inputNodeCount.value = nodes.length;
+        }
 
         if (resetSelectors || nodesChanged) {
             this._populateNodeSelectors(nodes);
@@ -292,6 +327,14 @@ class DijkstraDesktopApp {
         const canEditManual = this.isManualGraph && !this.manualBuildMode;
         this.btnEditManualTop.classList.toggle("hidden", !canEditManual);
         this.btnEditManualPanel.classList.toggle("hidden", !canEditManual);
+
+        // Deshabilitar controles de Dijkstra mientras se construye o edita un grafo manual
+        const disableDijkstra = Boolean(this.manualBuildMode);
+        this.selectSource.disabled = disableDijkstra;
+        this.selectTarget.disabled = disableDijkstra;
+        this.btnInitDijkstra.disabled = disableDijkstra;
+        this.btnNextStep.disabled = disableDijkstra;
+        this.btnRunAll.disabled = disableDijkstra;
     }
 
     _populateNodeSelectors(nodes) {
@@ -323,8 +366,14 @@ class DijkstraDesktopApp {
     // =========================================================================
 
     async handleGenerateGraph() {
-        const rawCount = parseInt(this.inputNodeCount.value, 10);
-        if (isNaN(rawCount) || rawCount < 7 || rawCount > 16) {
+        const rawStr = this.inputNodeCount.value.trim();
+        const rawCount = Number(rawStr);
+        if (
+            !/^\d+$/.test(rawStr) ||
+            !Number.isInteger(rawCount) ||
+            rawCount < 7 ||
+            rawCount > 16
+        ) {
             await this.showAlert(
                 "Cantidad inválida",
                 "El número de nodos debe ser un entero entre 7 y 16."
@@ -398,6 +447,28 @@ class DijkstraDesktopApp {
         this.applyBackendState(resp, false, false);
     }
 
+    async handleEndpointSelectorChange() {
+        if (this.manualBuildMode) {
+            return;
+        }
+        const source = this.selectSource.value;
+        const target = this.selectTarget.value;
+        if (!source || !target) {
+            return;
+        }
+        try {
+            const resp = await window.pywebview.api.handle_endpoint_change(
+                source,
+                target
+            );
+            if (resp && !resp.noop) {
+                this.applyBackendState(resp, false, false);
+            }
+        } catch (err) {
+            console.error("Error al actualizar origen/destino:", err);
+        }
+    }
+
     async handleNextStepDijkstra() {
         if (this.manualBuildMode) {
             await this.showAlert(
@@ -455,16 +526,14 @@ class DijkstraDesktopApp {
             return;
         }
 
-        this.manualHighlightedNodes = [u, v];
-        await this._syncManualPreview();
-
-        // Intentar agregar o volver bidireccional con las mismas validaciones
-        await this._processManualConnectionRequest(u, v, "", false, true);
-
         this.manualFirstNode = null;
-        this.manualHighlightedNodes = [];
+        this.manualHighlightedNodes = [u, v];
         this.manualInstruction.textContent =
             "Haga clic en el primer nodo en el grafo (se resaltará en azul), luego en el segundo nodo para crear la conexión.";
+        await this._syncManualPreview();
+
+        // Intentar agregar, sobrescribir o volver bidireccional con las mismas validaciones
+        await this._processManualConnectionRequest(u, v, "", false, true);
         await this._syncManualPreview();
     }
 
@@ -494,33 +563,34 @@ class DijkstraDesktopApp {
             return;
         }
 
-        if (!weightStr) {
-            await this.showAlert(
-                "Peso faltante",
-                `Ingrese un peso entero positivo para la conexión ${u} → ${v}.`
-            );
-            this.manualInputWeight.focus();
-            return;
-        }
-
-        const weightInt = Number(weightStr);
-        if (!Number.isInteger(weightInt) || weightInt <= 0) {
-            await this.showAlert(
-                "Peso inválido",
-                `El peso de la conexión ${u} → ${v} debe ser un número entero mayor que 0.`
-            );
-            this.manualInputWeight.focus();
-            return;
+        let cleanWeight = "";
+        if (weightStr !== "") {
+            const weightInt = Number(weightStr);
+            if (
+                !/^\d+$/.test(weightStr) ||
+                !Number.isInteger(weightInt) ||
+                weightInt <= 0
+            ) {
+                await this.showAlert(
+                    "Peso inválido",
+                    `El peso de la conexión ${u} → ${v} debe ser un número entero mayor que 0.`
+                );
+                this.manualInputWeight.focus();
+                return;
+            }
+            cleanWeight = String(weightInt);
         }
 
         this.manualFirstNode = null;
         this.manualHighlightedNodes = [u, v];
+        this.manualInstruction.textContent =
+            "Haga clic en el primer nodo en el grafo (se resaltará en azul), luego en el segundo nodo para crear la conexión.";
         await this._syncManualPreview();
 
         const addedOrUpdated = await this._processManualConnectionRequest(
             u,
             v,
-            String(weightInt),
+            cleanWeight,
             isBi,
             false
         );
@@ -530,13 +600,13 @@ class DijkstraDesktopApp {
             this.manualChkBi.checked = false;
         }
 
-        this.manualHighlightedNodes = [];
         await this._syncManualPreview();
     }
 
     /**
      * Valida e inserta/actualiza una conexión manual tanto desde clic gráfico como desde el formulario.
-     * Detecta conexiones inversas (preguntando si desea volverla bidireccional) y conexiones repetidas.
+     * Detecta conexiones repetidas (preguntando si desea sobrescribirla) y conexiones inversas
+     * (preguntando si desea volverla bidireccional).
      */
     async _processManualConnectionRequest(
         u,
@@ -554,38 +624,18 @@ class DijkstraDesktopApp {
             (c) => c.u === v && c.v === u && !c.bidirectional
         );
 
-        // 1. Si existe la conexión inversa unidireccional v -> u
-        if (idxRev !== -1) {
-            const revConn = this.manualConnections[idxRev];
-            const promptText = fromCanvasClick
-                ? `Ya existe la conexión ${v} → ${u}.\n¿Desea volverla bidireccional (${v} ↔ ${u})?`
-                : `Ya existe la conexión inversa ${v} → ${u}.\n¿Desea volverla bidireccional (${v} ↔ ${u})${weightStr ? ` con peso ${weightStr}` : ""}?`;
-
-            const makeBi = await this.showConfirm(
-                "Conexión inversa detectada",
-                promptText
-            );
-            if (makeBi) {
-                revConn.bidirectional = true;
-                if (weightStr) {
-                    revConn.weight = weightStr;
-                }
-                this._renderManualConnectionsList();
-                this.setStatus(
-                    `La conexión ${v} ↔ ${u} ahora es bidireccional.`
-                );
-                return true;
-            }
-            return false;
-        }
-
-        // 2. Si ya existe la misma conexión u -> v (o bidireccional equivalente)
+        // 1. Si ya existe la misma conexión u -> v (o bidireccional equivalente)
         if (idxSame !== -1) {
             const existingConn = this.manualConnections[idxSame];
-            if (fromCanvasClick) {
-                this.setStatus(
-                    `La conexión ${existingConn.u} → ${existingConn.v} ya existe en la lista.`
-                );
+            const currArrow = existingConn.bidirectional ? "↔" : "→";
+            const currWeightInfo = existingConn.weight
+                ? `peso ${existingConn.weight}`
+                : "sin peso asignado";
+            const overwrite = await this.showConfirm(
+                "Conexión existente",
+                `La conexión ${existingConn.u} ${currArrow} ${existingConn.v} (${currWeightInfo}) ya existe.\n¿Desea sobrescribirla?`
+            );
+            if (!overwrite) {
                 const inputEl = this.manualConnectionsContainer.querySelector(
                     `[data-conn-idx="${idxSame}"] .conn-weight-input`
                 );
@@ -593,40 +643,77 @@ class DijkstraDesktopApp {
                     inputEl.focus();
                     inputEl.select();
                 }
-                return false;
-            } else {
-                const modeDesc = isBi ? "bidireccional" : "unidireccional";
-                const overwrite = await this.showConfirm(
-                    "Conexión existente",
-                    `La conexión entre ${u} y ${v} ya existe.\n¿Desea sobrescribirla con peso ${weightStr} (${modeDesc})?`
+                this.setStatus(
+                    `Se conservó la conexión existente ${existingConn.u} ${currArrow} ${existingConn.v}.`
                 );
-                if (overwrite) {
-                    existingConn.u = u;
-                    existingConn.v = v;
-                    existingConn.weight = weightStr;
-                    existingConn.bidirectional = isBi;
-                    this._renderManualConnectionsList();
-                    this.setStatus(
-                        `Conexión ${u} ${isBi ? "↔" : "→"} ${v} actualizada con peso ${weightStr}.`
-                    );
-                    return true;
-                }
                 return false;
             }
+
+            existingConn.u = u;
+            existingConn.v = v;
+            existingConn.bidirectional = Boolean(isBi);
+            if (weightStr !== "") {
+                existingConn.weight = weightStr;
+            }
+            this._renderManualConnectionsList();
+            const inputEl = this.manualConnectionsContainer.querySelector(
+                `[data-conn-idx="${idxSame}"] .conn-weight-input`
+            );
+            if (inputEl && (fromCanvasClick || !existingConn.weight)) {
+                inputEl.focus();
+                inputEl.select();
+            }
+            const newArrow = existingConn.bidirectional ? "↔" : "→";
+            this.setStatus(
+                `Conexión ${u} ${newArrow} ${v} sobrescrita.`
+            );
+            return true;
+        }
+
+        // 2. Si existe la conexión inversa unidireccional v -> u
+        if (idxRev !== -1) {
+            const revConn = this.manualConnections[idxRev];
+            const promptText = `Ya existe la conexión en sentido inverso (${v} → ${u}).\n¿Desea convertirla en una conexión bidireccional (${v} ↔ ${u})?`;
+
+            const makeBi = await this.showConfirm(
+                "Conexión inversa existente",
+                promptText
+            );
+            if (makeBi) {
+                revConn.bidirectional = true;
+                if (weightStr !== "") {
+                    revConn.weight = weightStr;
+                }
+                this._renderManualConnectionsList();
+                const inputEl = this.manualConnectionsContainer.querySelector(
+                    `[data-conn-idx="${idxRev}"] .conn-weight-input`
+                );
+                if (inputEl && !revConn.weight) {
+                    inputEl.focus();
+                    inputEl.select();
+                }
+                this.setStatus(
+                    `La conexión ${v} ↔ ${u} ahora es bidireccional.`
+                );
+                return true;
+            }
+            this.setStatus(
+                `Operación cancelada. Se conservó ${v} → ${u} como unidireccional.`
+            );
+            return false;
         }
 
         // 3. Crear nueva conexión
-        const defaultWeight = fromCanvasClick ? "10" : weightStr;
         this.manualConnections.push({
             u,
             v,
-            weight: defaultWeight,
-            bidirectional: isBi,
+            weight: weightStr,
+            bidirectional: Boolean(isBi),
         });
         this._renderManualConnectionsList();
 
         const newIdx = this.manualConnections.length - 1;
-        if (fromCanvasClick) {
+        if (fromCanvasClick || !weightStr) {
             const inputEl = this.manualConnectionsContainer.querySelector(
                 `[data-conn-idx="${newIdx}"] .conn-weight-input`
             );
@@ -635,7 +722,7 @@ class DijkstraDesktopApp {
                 inputEl.select();
             }
             this.setStatus(
-                `Conexión ${u} → ${v} creada. Edite su peso o marque Bidireccional si lo desea.`
+                `Conexión ${u} ${isBi ? "↔" : "→"} ${v} agregada. Ingrese su peso en la lista.`
             );
         } else {
             this.setStatus(
@@ -730,12 +817,21 @@ class DijkstraDesktopApp {
     }
 
     async _syncManualPreview() {
+        if (!this.manualBuildMode || this._confirmingManual) {
+            return;
+        }
         try {
             const resp = await window.pywebview.api.sync_manual_preview(
                 this.manualConnections,
                 this.manualHighlightedNodes
             );
-            if (resp && resp.ok && resp.graph) {
+            if (
+                this.manualBuildMode &&
+                !this._confirmingManual &&
+                resp &&
+                resp.ok &&
+                resp.graph
+            ) {
                 this.graphRenderer.render(resp.graph);
             }
         } catch (err) {
@@ -744,13 +840,37 @@ class DijkstraDesktopApp {
     }
 
     async handleConfirmManualGraph() {
-        if (!this.manualBuildMode) {
+        if (!this.manualBuildMode || this._confirmingManual) {
             return;
         }
-        const resp = await window.pywebview.api.confirm_manual_graph(
-            this.manualConnections
-        );
-        this.applyBackendState(resp, false, false);
+        this._confirmingManual = true;
+        try {
+            const resp = await window.pywebview.api.confirm_manual_graph(
+                this.manualConnections
+            );
+            if (resp && !resp.ok) {
+                this.applyBackendState(resp, false, false);
+                const invalidIdx = this.manualConnections.findIndex((c) => {
+                    const w = String(c.weight ?? "").trim();
+                    const n = Number(w);
+                    return !/^\d+$/.test(w) || !Number.isInteger(n) || n <= 0;
+                });
+                if (invalidIdx !== -1) {
+                    const inputEl =
+                        this.manualConnectionsContainer.querySelector(
+                            `[data-conn-idx="${invalidIdx}"] .conn-weight-input`
+                        );
+                    if (inputEl) {
+                        inputEl.focus();
+                        inputEl.select();
+                    }
+                }
+                return;
+            }
+            this.applyBackendState(resp, true, false);
+        } finally {
+            this._confirmingManual = false;
+        }
     }
 
     // =========================================================================

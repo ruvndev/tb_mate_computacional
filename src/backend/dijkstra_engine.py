@@ -20,6 +20,7 @@ class DijkstraEngine:
             str, List[Tuple[float, Optional[str], int, bool]]
         ] = {}
         self.optimal_predecessors: Dict[str, List[str]] = {}
+        self.last_tie_iteration: Dict[str, int] = {}
         self.decision_history: List[str] = []
         self.processed_nodes: List[str] = []
 
@@ -34,6 +35,7 @@ class DijkstraEngine:
         self.labels.clear()
         self.label_history.clear()
         self.optimal_predecessors.clear()
+        self.last_tie_iteration.clear()
         self.decision_history.clear()
         self.processed_nodes.clear()
 
@@ -71,6 +73,17 @@ class DijkstraEngine:
             raise ValueError("Seleccione vértices válidos de origen y destino.")
         if source == target:
             raise ValueError("El origen y el destino deben ser diferentes.")
+        for u, v, edge_data in self.graph.edges(data=True):
+            weight = edge_data.get("weight")
+            if (
+                not isinstance(weight, int)
+                or isinstance(weight, bool)
+                or weight <= 0
+            ):
+                raise ValueError(
+                    f"La arista {u} -> {v} tiene un peso inválido ({weight}). "
+                    "Todos los pesos deben ser enteros positivos."
+                )
 
         self.source = source
         self.target = target
@@ -84,13 +97,18 @@ class DijkstraEngine:
         }
         self.label_history = {node: [] for node in self.graph.nodes}
         self.optimal_predecessors = {node: [] for node in self.graph.nodes}
+        self.last_tie_iteration.clear()
 
         self.labels[source] = (0, None, 0)
         self.label_history[source].append((0, None, 0, False))
 
+        # Agrupar la inicialización en una única entrada estructurada
         self.decision_history = [
-            f"Inicialización: el origen {source} recibe distancia 0.",
-            "Inicialización: los demás vértices reciben distancia ∞.",
+            (
+                f"Inicialización: el origen {source} recibe distancia 0 ([0, -]_0).\n"
+                f"Inicialización: los demás vértices reciben distancia ∞ ([∞, -]_0).\n"
+                f"Objetivo: hallar el camino mínimo desde {source} hasta {target}."
+            )
         ]
 
         return self.labels.copy()
@@ -104,16 +122,29 @@ class DijkstraEngine:
         ]
 
     def select_next_node(self) -> Optional[str]:
-        """Selecciona el vértice no procesado con la menor distancia acumulada."""
-        available_nodes = self.get_unprocessed_nodes()
-        if not available_nodes:
+        """
+        Selecciona el vértice no procesado con la menor distancia acumulada finita.
+        Los vértices con distancia infinita (∞) no son seleccionables como pivotes.
+        """
+        reachable_unprocessed = [
+            node
+            for node in self.get_unprocessed_nodes()
+            if self.labels.get(node, (float("inf"), None, 0))[0] != float("inf")
+        ]
+        if not reachable_unprocessed:
             return None
-        return min(available_nodes, key=lambda node: self.labels[node][0])
+        return min(
+            reachable_unprocessed,
+            key=lambda node: (
+                self.labels[node][0],
+                int(node[1:]) if node[1:].isdigit() else 999,
+            ),
+        )
 
     def execute_next_step(
         self,
     ) -> Dict[str, Tuple[float, Optional[str], int]]:
-        """Ejecuta una iteración del algoritmo de Dijkstra."""
+        """Ejecuta una iteración del algoritmo de Dijkstra agrupando sus decisiones."""
         if self.source is None:
             raise ValueError("Primero debe inicializar Dijkstra.")
 
@@ -124,9 +155,7 @@ class DijkstraEngine:
 
         if next_node is None:
             self.algorithm_finished = True
-            self.decision_history.append(
-                "Finalización: no quedan vértices sin procesar."
-            )
+            self._finalize_unreachable_nodes_in_log()
             return self.labels.copy()
 
         self.current_node = next_node
@@ -134,29 +163,20 @@ class DijkstraEngine:
         self.processed_nodes.append(next_node)
 
         current_distance = self.labels[next_node][0]
+        step_lines: List[str] = [
+            f"Iteración {self.iteration}: se selecciona {next_node} con distancia acumulada {int(current_distance)}."
+        ]
 
-        if current_distance == float("inf"):
-            self.decision_history.append(
-                f"Iteración {self.iteration}: se selecciona "
-                f"{next_node} con distancia ∞."
+        neighbors = self.get_successors(next_node)
+        if not neighbors:
+            step_lines.append(
+                f"El vértice {next_node} no tiene aristas salientes para evaluar."
             )
-            self.decision_history.append(
-                f"{next_node} es inalcanzable desde el origen. "
-                "Se revisa sin calcular distancias desde ∞."
-            )
-            neighbors: List[str] = []
-        else:
-            self.decision_history.append(
-                f"Iteración {self.iteration}: se selecciona "
-                f"{next_node} con distancia {int(current_distance)}."
-            )
-            neighbors = self.get_successors(next_node)
 
         for neighbor in neighbors:
             if neighbor in self.processed_nodes:
-                self.decision_history.append(
-                    f"Arista {next_node} -> {neighbor}: "
-                    "el vértice destino ya fue procesado."
+                step_lines.append(
+                    f"Arista {next_node} -> {neighbor}: el vértice adyacente {neighbor} ya fue procesado (se conserva su etiqueta permanente)."
                 )
                 continue
 
@@ -185,78 +205,102 @@ class DijkstraEngine:
                     else str(int(current_distance_neighbor))
                 )
 
+                self.optimal_predecessors[neighbor] = [next_node]
+                self.last_tie_iteration.pop(neighbor, None)
                 self.labels[neighbor] = (
                     candidate_distance,
                     next_node,
                     self.iteration,
                 )
-                self.optimal_predecessors[neighbor] = [next_node]
                 self.label_history[neighbor].append(
                     (candidate_distance, next_node, self.iteration, False)
                 )
 
-                self.decision_history.append(
+                step_lines.append(
                     f"Arista {next_node} -> {neighbor}, peso {weight}: "
-                    f"{int(current_distance)} + {weight} = "
-                    f"{int(candidate_distance)}. "
-                    f"Distancia anterior: {previous_distance_text}. "
-                    "Se actualiza la etiqueta."
+                    f"{int(current_distance)} + {weight} = {int(candidate_distance)} < {previous_distance_text}. "
+                    f"Actualización: se asigna [{int(candidate_distance)}, {next_node}]_{self.iteration}."
                 )
 
             elif candidate_distance == current_distance_neighbor:
                 if next_node not in self.optimal_predecessors[neighbor]:
                     self.optimal_predecessors[neighbor].append(next_node)
+                    combined_preds = "/".join(self.optimal_predecessors[neighbor])
+                    original_iteration = self.labels[neighbor][2]
+                    # Conservar el subíndice de iteración original en que se descubrió la distancia mínima
+                    self.labels[neighbor] = (
+                        candidate_distance,
+                        combined_preds,
+                        original_iteration,
+                    )
+                    self.last_tie_iteration[neighbor] = self.iteration
                     self.label_history[neighbor].append(
                         (candidate_distance, next_node, self.iteration, False)
                     )
-                    self.decision_history.append(
+                    step_lines.append(
                         f"Arista {next_node} -> {neighbor}, peso {weight}: "
-                        f"{int(current_distance)} + {weight} = "
-                        f"{int(candidate_distance)}. "
-                        "Se encuentra una ruta con igual distancia "
-                        "mínima. Se registra el predecesor alternativo "
-                        f"{next_node}."
+                        f"{int(current_distance)} + {weight} = {int(candidate_distance)}. "
+                        f"Empate en distancia mínima: se registra el predecesor alternativo {next_node} "
+                        f"(predecesores óptimos: {combined_preds})."
                     )
                 else:
-                    self.decision_history.append(
-                        f"Arista {next_node} -> {neighbor}: "
-                        "la alternativa óptima ya está registrada."
+                    step_lines.append(
+                        f"Arista {next_node} -> {neighbor}: la alternativa {next_node} ya estaba registrada."
                     )
 
             else:
-                self.decision_history.append(
+                step_lines.append(
                     f"Arista {next_node} -> {neighbor}, peso {weight}: "
-                    f"{int(current_distance)} + {weight} = "
-                    f"{int(candidate_distance)}. "
-                    f"La distancia conocida es "
-                    f"{int(current_distance_neighbor)}. "
-                    "Se conserva la etiqueta anterior."
+                    f"{int(current_distance)} + {weight} = {int(candidate_distance)} > {int(current_distance_neighbor)}. "
+                    "Sin mejora: se conserva la etiqueta anterior."
                 )
 
-        remaining_nodes = [
-            node
-            for node in self.graph.nodes
-            if node not in self.processed_nodes
-        ]
-
-        if not remaining_nodes:
+        # Verificar si aún quedan vértices alcanzables pendientes para la siguiente iteración
+        next_reachable = self.select_next_node()
+        if next_reachable is None:
             self.algorithm_finished = True
+            unreachable_nodes = [
+                n
+                for n in self.get_unprocessed_nodes()
+                if self.labels.get(n, (float("inf"), None, 0))[0] == float("inf")
+            ]
+            if unreachable_nodes:
+                step_lines.append(
+                    "Finalización: no quedan vértices alcanzables por procesar. "
+                    f"Vértices inalcanzables (distancia ∞): {', '.join(unreachable_nodes)}."
+                )
+            else:
+                step_lines.append(
+                    "Finalización: todos los vértices alcanzables del grafo fueron procesados."
+                )
+        else:
+            step_lines.append(
+                f"Fin de la iteración {self.iteration}. "
+                f"Siguiente candidato de menor distancia acumulada: {next_reachable}."
+            )
+
+        self.decision_history.append("\n".join(step_lines))
+        return self.labels.copy()
+
+    def _finalize_unreachable_nodes_in_log(self) -> None:
+        """Registra el cierre del algoritmo cuando ningún vértice restante es alcanzable."""
+        unreachable_nodes = [
+            n
+            for n in self.get_unprocessed_nodes()
+            if self.labels.get(n, (float("inf"), None, 0))[0] == float("inf")
+        ]
+        if unreachable_nodes:
             self.decision_history.append(
-                "Finalización: todos los vértices fueron revisados. "
-                "Los que conservan distancia ∞ son inalcanzables "
-                "desde el origen."
+                "Finalización: no existen caminos hacia los vértices restantes. "
+                f"Inalcanzables (distancia ∞): {', '.join(unreachable_nodes)}."
             )
         else:
             self.decision_history.append(
-                f"Fin de la iteración {self.iteration}. "
-                "Se continuará con el vértice pendiente "
-                "de menor distancia."
+                "Finalización: no quedan vértices sin procesar."
             )
 
-        return self.labels.copy()
-
     def execute_until_finished(self) -> None:
-        """Ejecuta pasos sucesivos de Dijkstra hasta finalizar la revisión de todos los nodos."""
+        """Ejecuta pasos sucesivos de Dijkstra hasta finalizar la revisión de todos los nodos alcanzables."""
         if self.source is None:
             raise ValueError("Primero debe inicializar Dijkstra.")
         while not self.algorithm_finished:
@@ -332,33 +376,67 @@ class DijkstraEngine:
                 "∞" if distance == float("inf") else str(int(distance))
             )
             predecessor_text = predecessor if predecessor is not None else "-"
+            is_target = node == self.target
+            is_source = node == self.source
+            is_curr = node == self.current_node and not self.algorithm_finished
+            tied_in_current_iter = (
+                self.last_tie_iteration.get(node) == current_iter
+                and current_iter > 0
+                and distance != float("inf")
+            )
 
-            if node == self.current_node and not self.algorithm_finished:
-                status = "▶ VÉRTICE ACTUAL (evaluando)"
+            # Conservar siempre la identidad distintiva del nodo Destino en todas las etapas
+            if is_curr:
+                if is_target:
+                    status = "▶★ VÉRTICE ACTUAL — Destino alcanzado (evaluando)"
+                elif is_source:
+                    status = "▶● VÉRTICE ACTUAL — Origen (evaluando)"
+                else:
+                    status = "▶ VÉRTICE ACTUAL (evaluando)"
                 block_tag = "current_block"
                 badge = "▶"
-            elif (
-                node == self.target
-                and self.algorithm_finished
-                and distance != float("inf")
-            ):
-                status = "★ Destino alcanzado (óptimo)"
-                block_tag = "target_reached_block"
-                badge = "★"
+            elif is_target:
+                if (node in processed or self.algorithm_finished) and distance != float("inf"):
+                    status = "★ Destino alcanzado (óptimo)"
+                    block_tag = "target_reached_block"
+                    badge = "★"
+                elif self.algorithm_finished and distance == float("inf"):
+                    status = "✕ Destino inalcanzable desde el origen"
+                    block_tag = "unreachable_block"
+                    badge = "✕"
+                elif iteration == current_iter and current_iter > 0 and distance != float("inf"):
+                    status = f"◎✦ Destino actualizado en iteración {current_iter}"
+                    block_tag = "target_pending_block"
+                    badge = "◎"
+                elif tied_in_current_iter:
+                    status = f"◎≡ Destino: empate en iteración {current_iter} (nuevo predecesor óptimo)"
+                    block_tag = "target_pending_block"
+                    badge = "◎"
+                elif distance != float("inf"):
+                    status = "◎ Destino alcanzado (en frontera, pendiente)"
+                    block_tag = "target_pending_block"
+                    badge = "◎"
+                else:
+                    status = "◎ Destino pendiente (distancia ∞)"
+                    block_tag = "target_pending_block"
+                    badge = "◎"
             elif (
                 iteration == current_iter
                 and current_iter > 0
-                and node != self.current_node
                 and distance != float("inf")
             ):
                 status = f"✦ Actualizado en iteración {current_iter}"
                 block_tag = "updated_now_block"
                 badge = "✦"
-            elif node == self.source:
+            elif tied_in_current_iter:
+                status = f"≡ Empate en iteración {current_iter} (nuevo predecesor óptimo)"
+                block_tag = "tie_now_block"
+                badge = "≡"
+            elif is_source:
                 status = "● Origen"
                 block_tag = "source_block"
                 badge = "●"
-            elif distance == float("inf") and node in processed:
+            elif distance == float("inf") and (node in processed or self.algorithm_finished):
                 status = "✕ Inalcanzable desde el origen"
                 block_tag = "unreachable_block"
                 badge = "✕"
@@ -366,14 +444,6 @@ class DijkstraEngine:
                 status = "✓ Procesado (etiqueta fija)"
                 block_tag = "processed_block"
                 badge = "✓"
-            elif node == self.target:
-                status = "◎ Destino pendiente"
-                block_tag = (
-                    "reachable_pending_block"
-                    if distance != float("inf")
-                    else "target_pending_block"
-                )
-                badge = "◎"
             elif distance != float("inf"):
                 status = "◆ Alcanzado (en frontera)"
                 block_tag = "reachable_pending_block"
@@ -393,8 +463,7 @@ class DijkstraEngine:
                     "iteration": iteration,
                     "status": status,
                     "block_tag": block_tag,
-                    "is_current": node == self.current_node
-                    and not self.algorithm_finished,
+                    "is_current": is_curr,
                 }
             )
 
@@ -444,44 +513,55 @@ class DijkstraEngine:
             lines_data: List[Dict[str, str]] = []
             for line in decision_text.splitlines():
                 if (
-                    "Se actualiza" in line
-                    or "Actualización:" in line
-                    or "igual distancia" in line
+                    "Actualización:" in line
+                    or "Se actualiza" in line
                     or "Empate" in line
+                    or "igual distancia" in line
                 ):
                     line_tag = "improved_line"
                 elif (
-                    "Se conserva" in line
+                    "Sin mejora:" in line
+                    or "Se conserva" in line
                     or "ya fue procesado" in line
-                    or "inalcanzable" in line
+                    or "ya estaba registrada" in line
                     or "ya está registrada" in line
-                    or "Sin mejora" in line
+                    or "no tiene aristas salientes" in line
                 ):
                     line_tag = "no_improve_line"
                 elif (
-                    "se selecciona" in line
-                    or "Se selecciona" in line
-                    or "Inicialización" in line
-                    or "Fin de la iteración" in line
+                    "Se selecciona" in line
+                    or "se selecciona" in line
                     or "Candidatos" in line
+                    or "Inicialización:" in line
+                    or "Objetivo:" in line
+                    or "Fin de la iteración" in line
+                    or "Siguiente candidato" in line
                 ):
                     line_tag = "selected_line"
                 elif (
-                    "Finalización" in line
-                    or "Alcanzado" in line
+                    "Alcanzado" in line
                     or "Finalizado" in line
+                    or "Finalización:" in line
+                    or "Inalcanzables" in line
                     or "termina" in line
+                    or "fueron procesados" in line
+                    or "procesados óptimamente" in line
                 ):
                     line_tag = "finished_line"
                 else:
                     line_tag = "default_line"
                 lines_data.append({"text": line, "tag": line_tag})
 
+            header_title = (
+                "INICIALIZACIÓN"
+                if index == 1
+                else f"ITERACIÓN {index - 1}"
+            )
             decisions_list.append(
                 {
                     "index": index,
                     "is_latest": is_latest,
-                    "header": f"{'▶ ' if is_latest else ''}DECISIÓN {index}",
+                    "header": f"{'▶ ' if is_latest else ''}DECISIÓN {index} — {header_title}",
                     "lines": lines_data,
                 }
             )
